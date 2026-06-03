@@ -4,10 +4,8 @@ import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import json
-from dataclasses import dataclass
-from typing import Tuple, Dict, Any
 
-# ==================== 常数与物理定义（增强版） ====================
+# ==================== 常数与物理定义 ====================
 CONSTANTS = {
     "SHEET_COUNT": 5,
     "SHEET_WIDTH": 1.25,
@@ -15,7 +13,6 @@ CONSTANTS = {
     "PIPE_OFFSET": 0.45,
     "EFFECT_DECAY_RATE": 14,
     "SLUDGE_LAYER_MAX_HEIGHT": 0.6,
-    "SLUDGE_SETTLE_RATE": 0.0002,          # 备用，增强模型会覆盖
     "SLUDGE_DISCHARGE_RATE": 0.02,
     "UNIF_PENALTY_FACTOR": 0.4,
     "PULSE_POWER_BOOST": 1.4,
@@ -23,10 +20,6 @@ CONSTANTS = {
 }
 
 ENHANCED_CONSTANTS = {
-    # 膜丝力学参数（目前仅用于占位，未在摆动中直接使用）
-    "FIBER_YOUNG_MODULUS": 2.5e9,
-    "FIBER_DIAMETER_m": 1.65e-3,
-    "FIBER_BENDING_STIFFNESS": 1.2e-5,
     # 两相流参数
     "BUBBLE_DRAG_COEFF": 0.44,
     "BUBBLE_DIAMETER_m": 0.002,
@@ -35,11 +28,11 @@ ENHANCED_CONSTANTS = {
     "VESILIND_V0": 7.0,
     "VESILIND_K": 0.6,
     "COMPRESSION_INDEX": 0.2,
-    # 膜污染参数
-    "MEMBRANE_RESISTANCE": 1.0e12,
-    "FOULING_RATE_CONST": 1.2e-4,
-    "BACKWASH_EFFICIENCY": 0.85,
-    "TMP_MAX": 50.0,
+    # 膜污染参数（修正后）
+    "MEMBRANE_RESISTANCE": 2.0e11,      # 固有阻力 m⁻¹
+    "FOULING_RATE_CONST": 1.0e-5,       # 污染速率常数
+    "BACKWASH_EFFICIENCY": 0.9,         # 反洗效率
+    "TMP_MAX": 60.0,                    # 最大 TMP (kPa)
 }
 
 PRESETS = {
@@ -95,47 +88,63 @@ PRESETS = {
 
 # ==================== 增强物理模型类 ====================
 class MembraneFouling:
-    def __init__(self, Rm: float = 1e12):
-        self.Rm = Rm
-        self.Rc = 0.0
-        self.Rp = 0.0
-        self.TMP = 0.0
-        self.flux = 20.0
+    """膜污染模型（恒通量模式）"""
+    def __init__(self, Rm: float = ENHANCED_CONSTANTS["MEMBRANE_RESISTANCE"]):
+        self.Rm = Rm                      # 固有阻力 m⁻¹
+        self.Rc = 0.0                     # 滤饼阻力 m⁻¹
+        self.Rp = 0.0                     # 不可逆污染阻力 m⁻¹
+        self.TMP = 0.0                    # 跨膜压差 kPa
+        self.flux = 15.0                  # 膜通量 L/(m²·h)
 
     def update(self, mlss: float, shear_pa: float, dt: float, backwash: bool = False) -> float:
         k_f = ENHANCED_CONSTANTS["FOULING_RATE_CONST"]
+        # 滤饼阻力变化率（Hermia 型，剪切力抑制沉积）
         dRc_dt = k_f * mlss / (1.0 + shear_pa) * (1.0 - self.Rc / 5e13)
         if backwash:
-            dRc_dt *= -ENHANCED_CONSTANTS["BACKWASH_EFFICIENCY"]
-            self.Rp *= 0.99
+            # 反洗：滤饼阻力以效率倍数减少
+            dRc_dt = -ENHANCED_CONSTANTS["BACKWASH_EFFICIENCY"] * abs(dRc_dt)
+            self.Rp *= 0.99               # 不可逆污染轻微恢复
         self.Rc += dRc_dt * dt
-        self.Rc = max(0.0, min(self.Rc, 1e14))
+        self.Rc = max(0.0, min(self.Rc, 5e13))
+
+        # 不可逆污染缓慢增长
         self.Rp += 1e-8 * mlss * dt
         self.Rp = min(self.Rp, 5e12)
-        mu = 0.001
-        J_ms = self.flux / 3600.0
+
+        # 达西定律计算 TMP (kPa)
+        mu = 0.001                        # Pa·s
+        J_ms = self.flux / 3600.0         # m/s
         self.TMP = mu * J_ms * (self.Rm + self.Rc + self.Rp) / 1000.0
         self.TMP = min(self.TMP, ENHANCED_CONSTANTS["TMP_MAX"])
         return self.TMP
 
+
 class SludgeCompression:
+    """污泥沉降与压缩模型"""
     @staticmethod
     def settling_velocity(mlss: float, v0: float = 7.0, k: float = 0.6) -> float:
         mlss_gL = mlss / 1000.0
-        return v0 * np.exp(-k * mlss_gL)
+        return v0 * np.exp(-k * mlss_gL)   # m/h
+
     @staticmethod
     def compression_factor(sludge_level: float, max_height: float) -> float:
         return (sludge_level / max_height) ** ENHANCED_CONSTANTS["COMPRESSION_INDEX"]
 
+
 class Hydraulics:
+    """水力与剪切力计算"""
     @staticmethod
-    def bubble_terminal_velocity(d_bubble: float = 0.002, rho_l=998, mu_l=0.001) -> float:
+    def bubble_terminal_velocity(d_bubble: float = 0.002) -> float:
         g = 9.81
-        v = np.sqrt(2.14 * ENHANCED_CONSTANTS["BUBBLE_DRAG_COEFF"] * g * d_bubble + 0.505 * g * d_bubble)
+        Cd = ENHANCED_CONSTANTS["BUBBLE_DRAG_COEFF"]
+        # Mendelson 公式
+        v = np.sqrt(2.14 * Cd * g * d_bubble + 0.505 * g * d_bubble)
         return v
+
     @staticmethod
     def shear_from_bubbles(bubble_vel: float, gas_hold_up: float, density: float = 998) -> float:
         return 0.5 * density * bubble_vel ** 2 * gas_hold_up * ENHANCED_CONSTANTS["GAS_HOLDUP_CORRECTION"]
+
     @staticmethod
     def gas_hold_up(aeration_intensity: float, h_size: float, p_pitch: float, s_pitch: float) -> float:
         orifice_factor = (4.0 / max(1.5, h_size)) ** 0.3
@@ -144,7 +153,9 @@ class Hydraulics:
         base_hold_up = 0.02 + 0.1 * intensity_norm
         return base_hold_up * orifice_factor * spacing_factor
 
+
 class EnhancedMBRSimulator:
+    """主仿真引擎"""
     def __init__(self):
         # 工艺参数
         self.intensity = 110.0
@@ -164,8 +175,9 @@ class EnhancedMBRSimulator:
         self.sludge_level = 0.15
         self.is_discharging = False
         self.sim_time = 0.0
-        # 增强模型
-        self.fouling = MembraneFouling(Rm=ENHANCED_CONSTANTS["MEMBRANE_RESISTANCE"])
+
+        # 子模型
+        self.fouling = MembraneFouling()
         self.sludge_compressor = SludgeCompression()
         self.hydraulics = Hydraulics()
         self.TMP_history = []
@@ -191,10 +203,10 @@ class EnhancedMBRSimulator:
         real_count = max(1, int(sheet_area / area_per_fiber))
         return real_count, min(real_count, 300)
 
-    def calculate_shear_stress(self) -> Tuple[float, float]:
+    def calculate_shear_stress(self) -> tuple:
         gas_hold_up = self.hydraulics.gas_hold_up(self.intensity, self.h_size, self.p_pitch, self.s_pitch)
         self.avg_gas_hold_up = gas_hold_up
-        bubble_vel = self.hydraulics.bubble_terminal_velocity(d_bubble=ENHANCED_CONSTANTS["BUBBLE_DIAMETER_m"])
+        bubble_vel = self.hydraulics.bubble_terminal_velocity()
         intensity_norm = (self.intensity - 50.0) / 100.0
         bubble_vel *= (1 + 0.8 * intensity_norm)
         avg_shear = self.hydraulics.shear_from_bubbles(bubble_vel, gas_hold_up)
@@ -208,11 +220,11 @@ class EnhancedMBRSimulator:
         return round(avg_shear, 3), round(max_shear, 3)
 
     def calculate_sec(self) -> float:
-        delta_p = 50e3
-        q_air = self.intensity * self.get_total_area() / 3600
-        power = delta_p * q_air / 0.7
-        flow_rate = 1.0
-        sec = power / flow_rate / 1000
+        delta_p = 50e3                     # Pa
+        q_air = self.intensity * self.get_total_area() / 3600  # m³/s
+        power = delta_p * q_air / 0.7      # 风机效率 70%
+        flow_rate = 1.0                    # 假设处理量 1 m³/h
+        sec = power / flow_rate / 1000     # kWh/m³
         sec = np.clip(sec, 0.05, 1.5)
         return round(sec, 3)
 
@@ -220,7 +232,7 @@ class EnhancedMBRSimulator:
         diff = abs(self.p_pitch - self.s_pitch)
         return round(max(0.0, 100.0 - diff * CONSTANTS["UNIF_PENALTY_FACTOR"]), 1)
 
-    def calculate_risk_level(self, max_shear: float):
+    def calculate_risk_level(self, max_shear: float) -> str:
         if max_shear < 0.8:
             return "HIGH"
         elif max_shear < 1.8:
@@ -242,8 +254,9 @@ class EnhancedMBRSimulator:
         if self.is_discharging:
             self.sludge_level = max(0.0, self.sludge_level - CONSTANTS["SLUDGE_DISCHARGE_RATE"] * dt)
         else:
-            v_settle = self.sludge_compressor.settling_velocity(self.mlss) / 3600.0
-            compress = self.sludge_compressor.compression_factor(self.sludge_level, CONSTANTS["SLUDGE_LAYER_MAX_HEIGHT"])
+            v_settle = self.sludge_compressor.settling_velocity(self.mlss) / 3600.0  # m/s
+            compress = self.sludge_compressor.compression_factor(self.sludge_level,
+                                                                  CONSTANTS["SLUDGE_LAYER_MAX_HEIGHT"])
             mlss_norm = (self.mlss - 2000.0) / 13000.0
             return_factor = np.clip(self.return_ratio / 100.0, 0.5, 3.0)
             net_settle = v_settle * (1 - compress) * mlss_norm * return_factor
@@ -256,22 +269,23 @@ class EnhancedMBRSimulator:
         self.TMP_history.append(tmp)
         if len(self.TMP_history) > 3600:
             self.TMP_history.pop(0)
+        self.backwash_flag = False   # 单次反洗后复位标志
         return tmp
 
     def perform_backwash(self):
         self.backwash_flag = True
+        # 立即更新一次污染模型以应用反洗效果
         avg_shear, _ = self.calculate_shear_stress()
         self.fouling.update(self.mlss, avg_shear, 0.1, backwash=True)
-        self.backwash_flag = False
 
     def discharge_sludge(self):
         self.sludge_level = max(0.0, self.sludge_level - 0.08)
         self.is_discharging = False
 
-    def get_metrics(self) -> Dict[str, Any]:
+    def get_metrics(self):
         avg_shear, max_shear = self.calculate_shear_stress()
         risk_text = self.calculate_risk_level(max_shear)
-        tmp = self.update_fouling(1.0)
+        tmp = self.update_fouling(1.0)   # 每小时更新一次 TMP
         return {
             "sec": self.calculate_sec(),
             "shear_avg": avg_shear,
@@ -288,7 +302,8 @@ class EnhancedMBRSimulator:
             "gas_hold_up": round(self.avg_gas_hold_up * 100, 1)
         }
 
-# ==================== 3D HTML 生成器（保持原样，与增强模型兼容） ====================
+
+# ==================== 3D HTML 生成器 ====================
 def generate_3d_html(sim):
     sheet_area = sim.get_sheet_area()
     diameter_m = sim.fiber_diameter / 1000
@@ -693,6 +708,7 @@ def generate_3d_html(sim):
     """
     return html
 
+
 # ==================== Streamlit UI ====================
 st.set_page_config(page_title="MBR 工程级仿真系统 v2.0", layout="wide")
 
@@ -700,7 +716,6 @@ if "sim" not in st.session_state:
     st.session_state.sim = EnhancedMBRSimulator()
 sim = st.session_state.sim
 
-# 侧边栏控件
 with st.sidebar:
     st.header("🧪 MBR 系统控制")
     c1, c2, c3 = st.columns(3)
@@ -756,13 +771,11 @@ with st.sidebar:
     sludge_percent = sim.sludge_level / 0.6 * 100
     st.progress(min(100, int(sludge_percent)), text=f"污泥层 {sim.sludge_level*1000:.0f} mm")
 
-# 主区域
 st.title("💧 MBR 工程级仿真系统 v2.0")
 st.caption("增强物理模型：Vesilind沉降 | 气泡剪切 | 膜污染(TMP) | 气含率 | 曝气能耗")
 
 metrics = sim.get_metrics()
 
-# 指标卡片
 col1, col2, col3, col4 = st.columns(4)
 col1.metric("能耗 SEC", f"{metrics['sec']} kWh/m³")
 col2.metric("平均剪切力", f"{metrics['shear_avg']} Pa")
@@ -784,7 +797,6 @@ st.markdown("### 🖥️ 3D 可视化视图")
 html_code = generate_3d_html(sim)
 st.components.v1.html(html_code, height=650, scrolling=False)
 
-# 趋势图
 with st.expander("📈 12小时趋势预测 (剪切力 & 污泥层 & TMP)"):
     times = np.linspace(0, 12, 50)
     shear_vals = []
@@ -806,8 +818,8 @@ with st.expander("📈 12小时趋势预测 (剪切力 & 污泥层 & TMP)"):
         avg, _ = temp.calculate_shear_stress()
         shear_vals.append(avg)
         sludge_vals.append(temp.sludge_level * 1000)
-        tmp_vals.append(temp.update_fouling(3600*0.24))
-        temp.update_sludge_level(3600*0.24)
+        tmp_vals.append(temp.update_fouling(3600 * 0.24))
+        temp.update_sludge_level(3600 * 0.24)
     fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.08,
                         subplot_titles=("剪切力 (Pa)", "污泥层高度 (mm)", "跨膜压力 TMP (kPa)"))
     fig.add_trace(go.Scatter(x=times, y=shear_vals, mode='lines+markers', name='剪切力', line=dict(color='#00f2ff')), row=1, col=1)
