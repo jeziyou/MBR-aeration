@@ -1,209 +1,10 @@
-import streamlit as st
-import numpy as np
-import pandas as pd
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-import json
-import sys
-
-# ==================== 常数与物理定义 ====================
-CONSTANTS = {
-    "SHEET_COUNT": 5,
-    "SHEET_WIDTH": 1.25,
-    "SHEET_END_MARGIN": 0.05,
-    "PIPE_OFFSET": 0.45,
-    "EFFECT_DECAY_RATE": 14,
-    "SLUDGE_LAYER_MAX_HEIGHT": 0.6,
-    "SLUDGE_SETTLE_RATE": 0.0002,
-    "SLUDGE_DISCHARGE_RATE": 0.02,
-    "UNIF_PENALTY_FACTOR": 0.4,
-    "PULSE_POWER_BOOST": 1.4,
-    "OFF_PHASE_POWER": 0.05,
-}
-
-PRESETS = {
-    "eco": {
-        "intensity": 60,
-        "pulse_period": 6.0,
-        "p_pitch": 250,
-        "s_pitch": 100,
-        "h_size": 6.0,
-        "f_len": 2.0,
-        "slack": 0.008,
-        "mode": "cont",
-        "fiber_diameter": 2.8,
-        "thickness": 30,
-        "mlss": 6000,
-        "srt": 20,
-        "settling_rate": 2.0,
-        "return_ratio": 80
-    },
-    "balanced": {
-        "intensity": 80,
-        "pulse_period": 4.0,
-        "p_pitch": 100,
-        "s_pitch": 80,
-        "h_size": 4.0,
-        "f_len": 2.0,
-        "slack": 0.015,
-        "mode": "cont",
-        "fiber_diameter": 1.65,
-        "thickness": 30,
-        "mlss": 8000,
-        "srt": 15,
-        "settling_rate": 2.5,
-        "return_ratio": 100
-    },
-    "flush": {
-        "intensity": 110,
-        "pulse_period": 3.0,
-        "p_pitch": 50,
-        "s_pitch": 50,
-        "h_size": 2.5,
-        "f_len": 2.0,
-        "slack": 0.025,
-        "mode": "pulse",
-        "fiber_diameter": 1.65,
-        "thickness": 30,
-        "mlss": 10000,
-        "srt": 12,
-        "settling_rate": 3.0,
-        "return_ratio": 150
-    }
-}
-
-class MBRSimulator:
-    def __init__(self):
-        self.intensity = 110.0
-        self.pulse_period = 3.0
-        self.p_pitch = 50
-        self.s_pitch = 50
-        self.h_size = 2.5
-        self.f_len = 2.0
-        self.slack = 0.025
-        self.fiber_diameter = 1.65
-        self.thickness = 30
-        self.mlss = 10000
-        self.srt = 12
-        self.settling_rate = 3.0
-        self.return_ratio = 150
-        self.mode = "pulse"
-        self.sludge_level = 0.15
-        self.is_discharging = False
-        self.sim_time = 0.0
-
-    def apply_preset(self, name: str):
-        preset = PRESETS[name]
-        for k, v in preset.items():
-            setattr(self, k, v)
-
-    def get_sheet_area(self) -> float:
-        base_area = 40.0 if self.fiber_diameter <= 1.8 else 25.0
-        return round(base_area * (self.thickness / 30.0) * (self.f_len / 2.0), 2)
-
-    def get_total_area(self) -> float:
-        return self.get_sheet_area() * CONSTANTS["SHEET_COUNT"]
-
-    def calculate_fiber_count(self):
-        sheet_area = self.get_sheet_area()
-        diameter_m = self.fiber_diameter / 1000.0
-        area_per_fiber = np.pi * diameter_m * self.f_len
-        real_count = max(1, int(sheet_area / area_per_fiber))
-        return real_count, min(real_count, 300)
-
-    def get_effective_intensity_factor(self, burst_active: bool = True) -> float:
-        norm_intensity = (self.intensity - 50.0) / 100.0
-        if self.mode == "pulse":
-            duty = min(1.0 / self.pulse_period, 0.5)
-            if burst_active:
-                pwr = norm_intensity * CONSTANTS["PULSE_POWER_BOOST"]
-            else:
-                pwr = CONSTANTS["OFF_PHASE_POWER"]
-            effective = duty * max(0.0, min(1.5, pwr)) + (1 - duty) * CONSTANTS["OFF_PHASE_POWER"]
-            return np.clip(effective, 0.05, 1.2)
-        else:
-            return np.clip(norm_intensity, 0.1, 1.0)
-
-    def calculate_shear_stress(self):
-        factor = self.get_effective_intensity_factor(True)
-        slack_factor = 1.0 + self.slack * 12.0
-        orifice_factor = (4.0 / max(1.5, self.h_size)) ** 0.4
-        pipe_factor = np.exp(-self.p_pitch / 180.0)
-        sheet_factor = np.exp(-self.s_pitch / 100.0)
-        base = 0.3 * factor * slack_factor * orifice_factor * (pipe_factor+0.3) * (sheet_factor+0.5)
-        avg = np.clip(base, 0.1, 3.5)
-        max_mult = 1.8 if self.mode == "pulse" else 1.2
-        max_shear = np.clip(avg * max_mult * (1.0 + self.slack * 3.0), 0.2, 6.0)
-        return round(avg, 3), round(max_shear, 3)
-
-    def calculate_sec(self):
-        norm = (self.intensity - 50.0) / 100.0
-        base = 0.12 + norm * 0.35
-        if self.mode == "pulse":
-            duty = min(1.0 / self.pulse_period, 0.5)
-            base *= (duty * 1.2 + (1-duty)*0.3)
-        return round(base, 3)
-
-    def calculate_uniformity(self):
-        diff = abs(self.p_pitch - self.s_pitch)
-        return round(max(0.0, 100.0 - diff * CONSTANTS["UNIF_PENALTY_FACTOR"]), 1)
-
-    def calculate_risk_level(self, max_shear):
-        if max_shear < 0.8:
-            return "HIGH"
-        elif max_shear < 1.8:
-            return "MEDIUM"
-        else:
-            return "LOW"
-
-    def calculate_svi(self):
-        svi = 200.0 - self.srt * 3.0 + (self.mlss / 10000.0) * 50.0
-        return round(np.clip(svi, 50.0, 280.0), 1)
-
-    def calculate_tss(self, avg_shear):
-        base = 5.0 + (self.sludge_level / CONSTANTS["SLUDGE_LAYER_MAX_HEIGHT"]) * 25.0
-        return round(np.clip(base + avg_shear * 1.5 * 2, 4.0, 35.0), 1)
-
-    def update_sludge_level(self, dt=1.0):
-        if self.is_discharging:
-            self.sludge_level = max(0.0, self.sludge_level - CONSTANTS["SLUDGE_DISCHARGE_RATE"] * dt)
-        else:
-            mlss_norm = (self.mlss - 2000.0) / 13000.0
-            return_factor = np.clip(self.return_ratio / 100.0, 0.5, 3.0)
-            settling_effect = self.settling_rate / 2.5
-            acc = CONSTANTS["SLUDGE_SETTLE_RATE"] * mlss_norm * return_factor * settling_effect
-            self.sludge_level += acc * dt
-            self.sludge_level = min(self.sludge_level, CONSTANTS["SLUDGE_LAYER_MAX_HEIGHT"])
-
-    def discharge_sludge(self):
-        self.sludge_level = max(0.0, self.sludge_level - 0.08)
-        self.is_discharging = False
-
-    def get_metrics(self):
-        avg, max_sh = self.calculate_shear_stress()
-        return {
-            "sec": self.calculate_sec(),
-            "shear_avg": avg,
-            "shear_max": max_sh,
-            "uniformity": self.calculate_uniformity(),
-            "risk_text": self.calculate_risk_level(max_sh),
-            "svi": self.calculate_svi(),
-            "tss": self.calculate_tss(avg),
-            "total_area": self.get_total_area(),
-            "fiber_count": self.calculate_fiber_count()[0] * CONSTANTS["SHEET_COUNT"],
-            "sludge_level_mm": self.sludge_level * 1000.0,
-            "sludge_percent": (self.sludge_level / CONSTANTS["SLUDGE_LAYER_MAX_HEIGHT"]) * 100.0
-        }
-
-
-# ==================== 3D HTML 生成函数（经过完整测试）====================
 def generate_3d_html(sim):
     # 计算显示膜丝数量
     sheet_area = sim.get_sheet_area()
     diameter_m = sim.fiber_diameter / 1000
     area_per_fiber = np.pi * diameter_m * sim.f_len
     real_fibers = max(1, int(sheet_area / area_per_fiber))
-    visual_fibers = min(real_fibers, 150)  # 控制性能
+    visual_fibers = min(real_fibers, 150)
 
     config = {
         "sheetCount": 5,
@@ -307,7 +108,6 @@ def generate_3d_html(sim):
             import * as THREE from 'three';
             import {{ OrbitControls }} from 'three/addons/controls/OrbitControls.js';
 
-            // 捕获错误并显示
             window.addEventListener('error', (e) => {{
                 const div = document.createElement('div');
                 div.className = 'error-msg';
@@ -373,7 +173,6 @@ def generate_3d_html(sim):
             rimLight.position.set(-2, 1, -4);
             scene.add(rimLight);
             
-            // 辅助网格
             const gridHelper = new THREE.GridHelper(12, 20, 0x3399ff, 0x2266aa);
             gridHelper.position.y = -F_LEN/2 - 0.5;
             gridHelper.material.transparent = true;
@@ -391,7 +190,6 @@ def generate_3d_html(sim):
                 const zPos = (i - 2) * S_PITCH_M;
                 const sheet = new THREE.Group();
                 
-                // 集水槽
                 const headerMat = new THREE.MeshStandardMaterial({{ color: 0xDDC8A0, metalness: 0.5 }});
                 const headerGeo = new THREE.BoxGeometry(SHEET_WIDTH, 0.1, 0.05);
                 const topHeader = new THREE.Mesh(headerGeo, headerMat);
@@ -400,7 +198,6 @@ def generate_3d_html(sim):
                 bottomHeader.position.y = -halfLen + 0.02;
                 sheet.add(topHeader, bottomHeader);
                 
-                // 导轨
                 const railMat = new THREE.MeshStandardMaterial({{ color: 0xCCCCDD, metalness: 0.9 }});
                 const railGeo = new THREE.BoxGeometry(0.03, F_LEN, 0.03);
                 const leftRail = new THREE.Mesh(railGeo, railMat);
@@ -409,7 +206,6 @@ def generate_3d_html(sim):
                 rightRail.position.set(halfWidth - SHEET_END_MARGIN, 0, 0);
                 sheet.add(leftRail, rightRail);
                 
-                // 膜丝
                 for (let f = 0; f < VISUAL_FIBERS; f++) {{
                     const x = VISUAL_FIBERS > 1 ? (f / (VISUAL_FIBERS-1)) * SHEET_WIDTH - halfWidth : 0;
                     const cylinderGeo = new THREE.CylinderGeometry(FIBER_RADIUS, FIBER_RADIUS, F_LEN, 12);
@@ -450,7 +246,6 @@ def generate_3d_html(sim):
                 branch.rotation.z = Math.PI/2;
                 branch.position.set(pos.x, -halfLen - PIPE_OFFSET, pos.z);
                 pipeGroup.add(branch);
-                // 连接管
                 const connector = new THREE.Mesh(new THREE.CylinderGeometry(0.018, 0.018, Math.abs(mainY + halfLen + PIPE_OFFSET), 8), pipeMat);
                 connector.position.set(0, (mainY + (-halfLen - PIPE_OFFSET))/2, pos.z);
                 pipeGroup.add(connector);
@@ -487,15 +282,22 @@ def generate_3d_html(sim):
                 bubbleData.active[i] = 1;
             }}
             
-            // 初始化：气泡分散在液柱中，避免首帧爆发
+            // 改进初始化：只激活 30% 的气泡，且主要分布在上半部分，避免首帧密集
+            const initActiveCount = Math.floor(BUBBLE_COUNT * 0.3);
             for (let i = 0; i < BUBBLE_COUNT; i++) {{
-                const pipe = pipePositions[Math.floor(Math.random() * pipePositions.length)];
-                bubbleData.posX[i] = (Math.random() - 0.5) * (SHEET_WIDTH - 0.2);
-                bubbleData.posY[i] = -halfLen - PIPE_OFFSET + 0.03 + Math.random() * (halfLen + 0.3);
-                bubbleData.posZ[i] = pipe.z + (Math.random() - 0.5) * 0.1;
-                bubbleData.vel[i] = BUBBLE_MIN_VEL + Math.random() * (BUBBLE_MAX_VEL - BUBBLE_MIN_VEL);
-                bubbleData.size[i] = 0.6 + Math.random() * 0.7;
-                bubbleData.active[i] = 1;
+                if (i < initActiveCount) {{
+                    const pipe = pipePositions[Math.floor(Math.random() * pipePositions.length)];
+                    bubbleData.posX[i] = (Math.random() - 0.5) * (SHEET_WIDTH - 0.2);
+                    // 高度范围：从中上部到顶部 (40% 到 100% 高度)
+                    const t = 0.4 + Math.random() * 0.6;
+                    bubbleData.posY[i] = -halfLen - PIPE_OFFSET + 0.03 + t * (halfLen + 0.3);
+                    bubbleData.posZ[i] = pipe.z + (Math.random() - 0.5) * 0.1;
+                    bubbleData.vel[i] = BUBBLE_MIN_VEL + Math.random() * (BUBBLE_MAX_VEL - BUBBLE_MIN_VEL);
+                    bubbleData.size[i] = 0.6 + Math.random() * 0.7;
+                    bubbleData.active[i] = 1;
+                }} else {{
+                    bubbleData.active[i] = 0;
+                }}
             }}
             
             // --- 动画循环 ---
@@ -503,6 +305,7 @@ def generate_3d_html(sim):
             let burstActive = true;
             let lastBurstState = true;
             let spawnAccum = 0;
+            let firstFrame = true;   // 首帧特殊标记，避免瞬间生成
             const dummyMat = new THREE.Object3D();
             const modeSpan = document.getElementById('mode-badge');
             
@@ -514,21 +317,23 @@ def generate_3d_html(sim):
                 const normIntensity = (INTENSITY - 50) / 100;
                 
                 let effectivePower = 0;
-                // 脉冲逻辑
                 if (MODE === 'cont') {{
                     effectivePower = normIntensity;
                     if (modeSpan) modeSpan.innerHTML = ' <span style="background:#00aaff; padding:2px 5px; border-radius:4px;">连续</span>';
-                    // 连续模式：匀速生成气泡
-                    const targetActive = Math.min(BUBBLE_COUNT, Math.floor(BUBBLE_COUNT * normIntensity * 0.5));
-                    const spawnRate = targetActive * 1.2 * dt;
-                    spawnAccum += spawnRate;
-                    let spawned = 0;
-                    for (let i = 0; i < BUBBLE_COUNT && spawnAccum >= 1 && spawned < 6; i++) {{
-                        if (!bubbleData.active[i]) {{
-                            const pipe = pipePositions[Math.floor(Math.random() * pipePositions.length)];
-                            resetBubble(i, pipe);
-                            spawnAccum -= 1;
-                            spawned++;
+                    
+                    // 连续模式：匀速生成气泡，首帧跳过生成，避免补充过快
+                    if (!firstFrame) {{
+                        const targetActive = Math.min(BUBBLE_COUNT, Math.floor(BUBBLE_COUNT * normIntensity * 0.5));
+                        const spawnRate = targetActive * 0.8 * dt;
+                        spawnAccum += spawnRate;
+                        let spawned = 0;
+                        for (let i = 0; i < BUBBLE_COUNT && spawnAccum >= 1 && spawned < 4; i++) {{
+                            if (!bubbleData.active[i]) {{
+                                const pipe = pipePositions[Math.floor(Math.random() * pipePositions.length)];
+                                resetBubble(i, pipe);
+                                spawnAccum -= 1;
+                                spawned++;
+                            }}
                         }}
                     }}
                 }} else {{
@@ -537,9 +342,9 @@ def generate_3d_html(sim):
                     if (burstActive) {{
                         effectivePower = normIntensity * PULSE_BOOST;
                         if (modeSpan) modeSpan.innerHTML = ' <span style="background:#ff5500; padding:2px 5px; border-radius:4px; animation: blink 0.8s infinite;">脉冲 ON</span>';
-                        // 脉冲开启瞬间，一次性生成一批气泡
-                        if (!lastBurstState) {{
-                            const burstCount = Math.floor(BUBBLE_COUNT * normIntensity * 0.4);
+                        // 脉冲开启瞬间，一次性生成一批气泡（首帧除外）
+                        if (!lastBurstState && !firstFrame) {{
+                            const burstCount = Math.floor(BUBBLE_COUNT * normIntensity * 0.3);
                             let spawned = 0;
                             for (let i = 0; i < BUBBLE_COUNT && spawned < burstCount; i++) {{
                                 if (!bubbleData.active[i]) {{
@@ -552,12 +357,14 @@ def generate_3d_html(sim):
                     }} else {{
                         effectivePower = 0;
                         if (modeSpan) modeSpan.innerHTML = ' <span style="background:#333; padding:2px 5px; border-radius:4px;">脉冲 OFF</span>';
-                        // 关闭阶段：不生成新气泡
                     }}
                     lastBurstState = burstActive;
                 }}
                 
-                // 更新所有气泡位置（无论脉冲状态，上升速度正常）
+                // 首帧标记清除
+                if (firstFrame) firstFrame = false;
+                
+                // 更新所有气泡位置
                 for (let i = 0; i < BUBBLE_COUNT; i++) {{
                     if (!bubbleData.active[i]) continue;
                     bubbleData.posY[i] += bubbleData.vel[i] * (1 + normIntensity * 1.2) * dt * 60;
@@ -603,7 +410,6 @@ def generate_3d_html(sim):
             
             animate();
             
-            // 全屏和复位
             document.getElementById('fullscreen').addEventListener('click', () => {{
                 if (!document.fullscreenElement) document.documentElement.requestFullscreen();
                 else document.exitFullscreen();
@@ -620,7 +426,6 @@ def generate_3d_html(sim):
                 renderer.setSize(window.innerWidth, window.innerHeight);
             }});
             
-            // 添加 CSS 动画
             const style = document.createElement('style');
             style.textContent = `@keyframes blink {{ 0%{{opacity:0.3;}}50%{{opacity:1;}}100%{{opacity:0.3;}}}}`;
             document.head.appendChild(style);
@@ -629,108 +434,3 @@ def generate_3d_html(sim):
     </html>
     """
     return html
-
-
-# ==================== Streamlit 界面 ====================
-st.set_page_config(page_title="MBR 工业仿真 v14.4", layout="wide")
-
-if "sim" not in st.session_state:
-    st.session_state.sim = MBRSimulator()
-sim = st.session_state.sim
-
-# 侧边栏控件
-with st.sidebar:
-    st.header("🧪 MBR 系统控制")
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        if st.button("🌿 节能模式", use_container_width=True):
-            sim.apply_preset("eco")
-            st.rerun()
-    with c2:
-        if st.button("⚖️ 均衡模式", use_container_width=True):
-            sim.apply_preset("balanced")
-            st.rerun()
-    with c3:
-        if st.button("💨 高冲刷模式", use_container_width=True):
-            sim.apply_preset("flush")
-            st.rerun()
-
-    st.divider()
-    st.subheader("🌊 曝气参数")
-    sim.mode = st.selectbox("曝气模式", ["cont", "pulse"], format_func=lambda x: "连续曝气" if x == "cont" else "脉冲式曝气")
-    sim.intensity = st.slider("曝气强度 (Nm³/m²/h)", 50, 150, int(sim.intensity), step=5)
-    if sim.mode == "pulse":
-        sim.pulse_period = st.slider("脉冲周期 (s)", 3.0, 6.0, float(sim.pulse_period), step=0.5)
-    sim.h_size = st.slider("曝气孔径 (mm)", 1.0, 15.0, float(sim.h_size), step=0.5)
-    sim.p_pitch = st.slider("曝气管间距 (mm)", 50, 300, int(sim.p_pitch), step=10)
-
-    st.divider()
-    st.subheader("🧬 膜片参数")
-    sim.fiber_diameter = st.selectbox("膜丝外径", [1.65, 2.8], format_func=lambda x: f"{x} mm → {'40' if x==1.65 else '25'} m²")
-    sim.thickness = st.slider("膜片厚度 (mm)", 10, 100, int(sim.thickness), step=5)
-    sim.s_pitch = st.slider("膜片间距 (mm)", 50, 100, int(sim.s_pitch), step=5)
-    sim.f_len = st.slider("膜丝长度 (m)", 0.1, 3.0, float(sim.f_len), step=0.1)
-    sim.slack = st.slider("松弛度 (%)", 0.2, 5.0, float(sim.slack * 100), step=0.2) / 100.0
-
-    st.divider()
-    st.subheader("🧫 污泥参数")
-    sim.mlss = st.slider("MLSS (mg/L)", 2000, 15000, int(sim.mlss), step=500)
-    sim.srt = st.slider("污泥龄 (d)", 5, 40, int(sim.srt), step=1)
-    sim.settling_rate = st.slider("沉降速率 (m/h)", 0.5, 6.0, float(sim.settling_rate), step=0.5)
-    sim.return_ratio = st.slider("回流比 (%)", 50, 300, int(sim.return_ratio), step=10)
-    if st.button("⬇️ 排泥", use_container_width=True):
-        sim.discharge_sludge()
-        st.rerun()
-    if st.button("⏱️ 模拟1小时", use_container_width=True):
-        sim.update_sludge_level(3600)
-        st.rerun()
-    sludge_percent = sim.sludge_level / 0.6 * 100
-    st.progress(min(100, int(sludge_percent)), text=f"污泥层 {sim.sludge_level*1000:.0f} mm")
-
-# 主区域
-st.title("💧 MBR 工业仿真系统 v14.4")
-st.caption("圆柱体膜丝 | 动态光照 | 脉冲/连续曝气 | 鼠标拖拽旋转/缩放")
-
-metrics = sim.get_metrics()
-cols = st.columns(4)
-cols[0].metric("能耗 SEC", f"{metrics['sec']} kWh/m³")
-cols[1].metric("平均剪切力", f"{metrics['shear_avg']} Pa")
-cols[2].metric("最大剪切力", f"{metrics['shear_max']} Pa")
-cols[3].metric("覆盖均匀度", f"{metrics['uniformity']} %")
-cols2 = st.columns(4)
-cols2[0].metric("积垢风险", metrics['risk_text'])
-cols2[1].metric("SVI", f"{metrics['svi']} mL/g")
-cols2[2].metric("TSS", f"{metrics['tss']} mg/L")
-cols2[3].metric("总膜面积", f"{metrics['total_area']} m²")
-
-st.markdown("### 🖥️ 3D 可视化视图")
-html_code = generate_3d_html(sim)
-st.components.v1.html(html_code, height=650, scrolling=False)
-
-# 趋势图
-with st.expander("📈 12小时趋势预测"):
-    times = np.linspace(0, 12, 50)
-    shear_vals = []
-    sludge_vals = []
-    temp = MBRSimulator()
-    temp.intensity = sim.intensity
-    temp.mode = sim.mode
-    temp.pulse_period = sim.pulse_period
-    temp.p_pitch = sim.p_pitch
-    temp.s_pitch = sim.s_pitch
-    temp.h_size = sim.h_size
-    temp.slack = sim.slack
-    temp.mlss = sim.mlss
-    temp.settling_rate = sim.settling_rate
-    temp.return_ratio = sim.return_ratio
-    temp.sludge_level = sim.sludge_level
-    for _ in times:
-        avg, _ = temp.calculate_shear_stress()
-        shear_vals.append(avg)
-        sludge_vals.append(temp.sludge_level * 1000)
-        temp.update_sludge_level(3600 * 0.24)
-    fig = make_subplots(rows=2, cols=1, shared_xaxes=True)
-    fig.add_trace(go.Scatter(x=times, y=shear_vals, mode='lines+markers', name='剪切力 (Pa)', line=dict(color='#00f2ff')), row=1, col=1)
-    fig.add_trace(go.Scatter(x=times, y=sludge_vals, mode='lines', name='污泥层 (mm)', line=dict(color='#d4a84b')), row=2, col=1)
-    fig.update_layout(height=400, template="plotly_dark")
-    st.plotly_chart(fig, use_container_width=True)
