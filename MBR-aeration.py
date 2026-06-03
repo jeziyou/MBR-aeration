@@ -688,27 +688,28 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("### 🌊 曝气参数 Aeration")
     sim.mode = st.selectbox("曝气模式", ["cont", "pulse"], format_func=lambda x: "连续曝气" if x=="cont" else "脉冲式曝气", index=0 if sim.mode=="cont" else 1)
-    sim.intensity = st.slider("曝气强度 (Nm³/m²/h)", 50, 150, sim.intensity, step=5)
+    # 修复类型错误：intensity 转换为 int
+    sim.intensity = st.slider("曝气强度 (Nm³/m²/h)", 50, 150, int(sim.intensity), step=5)
     if sim.mode == "pulse":
-        sim.pulse_period = st.slider("脉冲周期 (s)", 3.0, 6.0, sim.pulse_period, step=0.5)
-    sim.h_size = st.slider("曝气孔径 (mm)", 1.0, 15.0, sim.h_size, step=0.5)
-    sim.p_pitch = st.slider("曝气管间距 (mm)", 50, 300, sim.p_pitch, step=10)
+        sim.pulse_period = st.slider("脉冲周期 (s)", 3.0, 6.0, float(sim.pulse_period), step=0.5)
+    sim.h_size = st.slider("曝气孔径 (mm)", 1.0, 15.0, float(sim.h_size), step=0.5)
+    sim.p_pitch = st.slider("曝气管间距 (mm)", 50, 300, int(sim.p_pitch), step=10)
     
     st.markdown("---")
     st.markdown("### 🧬 膜片参数 Membrane")
     fd_opt = {1.65: "1.65 mm → 40 m²", 2.8: "2.8 mm → 25 m²"}
     sim.fiber_diameter = st.selectbox("膜丝外径", options=[1.65, 2.8], format_func=lambda x: fd_opt[x], index=0 if sim.fiber_diameter==1.65 else 1)
-    sim.thickness = st.slider("膜片厚度 (mm)", 10, 100, sim.thickness, step=5)
-    sim.s_pitch = st.slider("膜片排列间距 (mm)", 50, 100, sim.s_pitch, step=5)
-    sim.f_len = st.slider("膜丝长度 (m)", 0.1, 3.0, sim.f_len, step=0.1)
-    sim.slack = st.slider("膜丝松弛度 (%)", 0.2, 5.0, sim.slack*100.0, step=0.2) / 100.0
+    sim.thickness = st.slider("膜片厚度 (mm)", 10, 100, int(sim.thickness), step=5)
+    sim.s_pitch = st.slider("膜片排列间距 (mm)", 50, 100, int(sim.s_pitch), step=5)
+    sim.f_len = st.slider("膜丝长度 (m)", 0.1, 3.0, float(sim.f_len), step=0.1)
+    sim.slack = st.slider("膜丝松弛度 (%)", 0.2, 5.0, float(sim.slack*100.0), step=0.2) / 100.0
     
     st.markdown("---")
     st.markdown("### 🧫 污泥参数 Sludge")
-    sim.mlss = st.slider("MLSS 浓度 (mg/L)", 2000, 15000, sim.mlss, step=500)
-    sim.srt = st.slider("污泥龄 SRT (d)", 5, 40, sim.srt, step=1)
-    sim.settling_rate = st.slider("沉降速率 (m/h)", 0.5, 6.0, sim.settling_rate, step=0.5)
-    sim.return_ratio = st.slider("污泥回流比 (%)", 50, 300, sim.return_ratio, step=10)
+    sim.mlss = st.slider("MLSS 浓度 (mg/L)", 2000, 15000, int(sim.mlss), step=500)
+    sim.srt = st.slider("污泥龄 SRT (d)", 5, 40, int(sim.srt), step=1)
+    sim.settling_rate = st.slider("沉降速率 (m/h)", 0.5, 6.0, float(sim.settling_rate), step=0.5)
+    sim.return_ratio = st.slider("污泥回流比 (%)", 50, 300, int(sim.return_ratio), step=10)
     
     col_d1, col_d2 = st.columns(2)
     with col_d1:
