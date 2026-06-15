@@ -571,8 +571,8 @@ const HW      = {header_width:.3f};
 const SH      = {sludge_height:.3f};
 const SLACK   = {slack_amount:.3f};
 const FD      = {fiber_diameter_m:.5f};
-const VFC     = Math.max(8, Math.min(24, Math.floor(SW / 0.04)));
-const VFC_Z   = Math.max(4, Math.min(10, Math.floor(MD / 0.008)));
+const VFC     = 6;   // X 方向膜丝数（示意）
+const VFC_Z   = 3;   // Z 方向膜层数（示意）
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x0d1117);
@@ -584,8 +584,7 @@ camera.lookAt(SW * 0.5, FL * 0.4, TD * 0.5);
 
 const renderer = new THREE.WebGLRenderer({{ antialias: true }});
 renderer.setSize(window.innerWidth, window.innerHeight);
-renderer.shadowMap.enabled = true;
-renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.shadowMap.enabled = false;
 document.body.appendChild(renderer.domElement);
 
 const controls = new OrbitControls(camera, renderer.domElement);
@@ -600,8 +599,6 @@ controls.update();
 scene.add(new THREE.AmbientLight(0x8090b0, 2.0));
 const sun = new THREE.DirectionalLight(0xffffff, 2.5);
 sun.position.set(TD + 4, MH + 3, TD + 3);
-sun.castShadow = true;
-sun.shadow.mapSize.set(2048, 2048);
 scene.add(sun);
 const fillLight = new THREE.PointLight(0x4488cc, 1.0, 10);
 fillLight.position.set(SW * 0.5, FL * 0.5, TD * 0.5);
@@ -620,9 +617,9 @@ const headerMat = new THREE.MeshStandardMaterial({{ color: 0x66aadd, metalness: 
 const pipeMat   = new THREE.MeshStandardMaterial({{ color: 0xff8844, metalness: 0.4, roughness: 0.4 }});
 const sludgeMat = new THREE.MeshStandardMaterial({{ color: 0x775522, metalness: 0, roughness: 1.0, transparent: true, opacity: 0.45 }});
 
-// 预生成膜丝几何体（复用，减少 draw call）
-const segs = 6;
-const segGeo = new THREE.CylinderGeometry(FD * 0.5, FD * 0.5, FL / segs, 5);
+// 预生成膜丝几何体（复用 InstancedMesh）
+const segs = 4;
+const segGeo = new THREE.CylinderGeometry(FD * 0.5, FD * 0.5, FL / segs, 4);
 
 // ---- 逐个膜帘组件 ----
 for (let si = 0; si < SC; si++) {{
@@ -671,30 +668,28 @@ for (let si = 0; si < SC; si++) {{
     scene.add(st);
   }}
 
-  // ===== 中空纤维膜丝（密集垂直排列于壳体内）====
-  // 每帘：X 方向 VFC 根，Z 方向 VFC_Z 层
+  // ===== 中空纤维膜丝（使用 InstancedMesh，大幅减少对象）====
+  const fiberSegCount = VFC * VFC_Z * segs;
+  const fiberMesh = new THREE.InstancedMesh(segGeo, fiberMat, fiberSegCount);
+  const dummy = new THREE.Object3D();
+  let idx = 0;
   for (let fi = 0; fi < VFC; fi++) {{
-    const fx = (fi + 0.3 + Math.random() * 0.4) / VFC * (SW - HW * 1.5) + HW * 0.75;
-    // 预计算该膜丝的弯曲偏移
+    const fx = (fi + 0.5) / VFC * (SW - HW * 1.5) + HW * 0.75;
     const bx = (Math.random() - 0.5) * SLACK;
     const bz = (Math.random() - 0.5) * SLACK * 0.4;
-
     for (let fz_i = 0; fz_i < VFC_Z; fz_i++) {{
       const fz = cz - MD * 0.45 + (fz_i + 0.5) / VFC_Z * MD * 0.9;
-
-      // 6 段拼接模拟轻微弧垂
       for (let s = 0; s < segs; s++) {{
         const t = (s + 0.5) / segs;
         const curve = Math.sin(t * Math.PI);
-        const sy = s * (FL / segs) + (FL / segs) * 0.5;
-        const seg = new THREE.Mesh(segGeo, fiberMat);
-        seg.position.set(fx + bx * curve, sy, fz + bz * curve);
-        seg.castShadow = false;
-        seg.receiveShadow = true;
-        scene.add(seg);
+        dummy.position.set(fx + bx * curve, s * (FL / segs) + (FL / segs) * 0.5, fz + bz * curve);
+        dummy.updateMatrix();
+        fiberMesh.setMatrixAt(idx++, dummy.matrix);
       }}
     }}
   }}
+  fiberMesh.instanceMatrix.needsUpdate = true;
+  scene.add(fiberMesh);
 }}
 
 // ---- 曝气管（每帘底部，X 方向，多根细管）----
@@ -736,7 +731,7 @@ scene.add(waterLine);
 const bGeo = new THREE.SphereGeometry(0.008, 5, 5);
 const bMat = new THREE.MeshBasicMaterial({{ color: 0xaaddff, transparent: true, opacity: 0.5 }});
 const bubbles = [];
-for (let i = 0; i < 150; i++) {{
+for (let i = 0; i < 50; i++) {{
   const b = new THREE.Mesh(bGeo, bMat);
   const si = Math.floor(Math.random() * SC);
   b.position.set(
