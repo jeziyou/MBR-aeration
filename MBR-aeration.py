@@ -498,28 +498,34 @@ class EnhancedMBRSimulator:
 # ==================== 3D 可视化生成器 ====================
 def generate_3d_html(sim: EnhancedMBRSimulator) -> str:
     """
-    生成 MBR 膜架 3D 可视化 HTML。
-    使用 Three.js 渲染膜片、曝气管和污泥层。
+    生成 MBR 帘式膜组件 3D 可视化 HTML。
+    参考实物：水平放置的 PVDF 中空纤维膜模块，白色外壳，膜丝束垂直悬挂，
+    两侧各有产水集水管，底部曝气管。
     """
     sheet_count: int = PHYS.sheet_count
-    sheet_width: float = PHYS.sheet_width
-    sheet_spacing: float = sim.s_pitch / 1000.0  # mm -> m
-    fiber_len: float = sim.f_len
+    sheet_width: float = PHYS.sheet_width    # 膜架宽度（X）
+    sheet_spacing: float = sim.s_pitch / 1000.0  # 帘间距（Z）
+    fiber_len: float = sim.f_len            # 膜丝有效长度（Y）
+    fiber_diameter_m: float = sim.fiber_diameter / 1000.0
     sludge_height: float = sim.sludge_level
     sludge_mm: float = sim.sludge_level * 1000.0
     pipe_offset: float = PHYS.pipe_offset
+    slack_amount: float = sim.slack * 1.5   # 膜丝松弛程度
 
-    # 帘式中空纤维膜：沿 Z 轴排列，每帘由多根垂直中空纤维膜丝组成
-    fiber_diameter_m: float = sim.fiber_diameter / 1000.0  # mm -> m
-    # 视觉上每帘显示膜丝数量（实际成千上万，此处示意）
-    visual_fiber_count: int = min(30, max(8, int(sheet_width / (fiber_diameter_m * 8))))
-    fiber_radius: float = max(0.002, fiber_diameter_m / 2.0)  # 视觉最小半径
-    slack_amount: float = sim.slack * 2.0  # 松弛度 → 膜丝弯曲幅度
+    # 膜组件壳体尺寸（参考实物比例）
+    module_height: float = fiber_len + 0.3  # 总高（含集水管）
+    module_depth: float = 0.08              # 壳体厚度（Z）
+    header_height: float = 0.05             # 集水管高度
+    header_width: float = 0.04               # 集水管宽度（两侧）
 
-    total_depth: float = sheet_count * 0.01 + (sheet_count - 1) * sheet_spacing
-    cam_x: float = sheet_width * 0.8
-    cam_y: float = fiber_len * 0.7
-    cam_z: float = total_depth + 2.5
+    # 帘间距（沿 Z 轴）
+    total_depth: float = sheet_count * module_depth + (sheet_count - 1) * sheet_spacing
+
+    # 相机位置
+    cam_x: float = sheet_width * 0.5
+    cam_y: float = module_height * 0.5
+    cam_z: float = total_depth + 3.0
+    slack_amount: float = sim.slack * 1.5
 
     return f"""<!DOCTYPE html>
 <html lang="zh">
@@ -527,21 +533,22 @@ def generate_3d_html(sim: EnhancedMBRSimulator) -> str:
 <meta charset="UTF-8">
 <style>
   body {{ margin: 0; overflow: hidden; background: #0d1117; font-family: sans-serif; }}
-  #info {{ position: absolute; top: 10px; left: 20px; color: #c9d1d9; font-size: 13px; }}
-  .legend {{ position: absolute; bottom: 20px; right: 20px; color: #8b949e; font-size: 12px; }}
-  .legend span {{ display: inline-block; width: 12px; height: 12px; margin-right: 4px; border-radius: 2px; }}
+  #info {{ position: absolute; top: 10px; left: 20px; color: #c9d1d9; font-size: 13px; line-height: 1.6; }}
+  .legend {{ position: absolute; bottom: 20px; right: 20px; color: #8b949e; font-size: 12px; background: rgba(13,17,23,0.7); padding: 8px 12px; border-radius: 4px; }}
+  .legend span {{ display: inline-block; width: 12px; height: 12px; margin-right: 4px; border-radius: 2px; vertical-align: middle; }}
 </style>
 </head>
 <body>
 <div id="info">
-  <b>MBR 帘式中空纤维膜 3D 视图</b><br>
-  膜丝外径: {sim.fiber_diameter} mm | 膜丝长度: {fiber_len:.1f} m | 污泥层: {sludge_mm:.0f} mm
+  <b>MBR 帘式膜组件 3D 视图</b><br>
+  膜丝外径: {sim.fiber_diameter} mm | 膜丝长: {fiber_len:.2f} m | 帘数: {sheet_count} | 间距: {sim.s_pitch} mm<br>
+  污泥层: {sludge_mm:.0f} mm | MLSS: {sim.mlss} mg/L | SRT: {sim.srt} d
 </div>
 <div class="legend">
-  <span style="background:#4499ff"></span> 中空纤维膜丝 &nbsp;
-  <span style="background:#66bbff"></span> 集水管 &nbsp;
-  <span style="background:#ff8844"></span> 曝气管 &nbsp;
-  <span style="background:#886633;opacity:0.5"></span> 污泥层
+  <span style="background:#eeeeee"></span> 膜壳 &nbsp;
+  <span style="background:#4499ff"></span> 膜丝 &nbsp;
+  <span style="background:#66aadd"></span> 产水集水管 &nbsp;
+  <span style="background:#ff8844"></span> 曝气管
 </div>
 <script type="importmap">
 {{ "imports": {{ "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
@@ -551,24 +558,29 @@ def generate_3d_html(sim: EnhancedMBRSimulator) -> str:
 import * as THREE from 'three';
 import {{ OrbitControls }} from 'three/addons/controls/OrbitControls.js';
 
-const SW = {sheet_width:.3f};
-const FL = {fiber_len:.3f};
-const SS = {sheet_spacing:.3f};
-const SC = {sheet_count};
-const PO = {pipe_offset:.3f};
-const TD = {total_depth:.3f};
-const SH = {sludge_height:.3f};
-const VFC = {visual_fiber_count};
-const FR = {fiber_radius:.4f};
-const SLACK = {slack_amount:.3f};
+const SW      = {sheet_width:.3f};
+const FL      = {fiber_len:.3f};
+const SS      = {sheet_spacing:.3f};
+const SC      = {sheet_count};
+const PO      = {pipe_offset:.3f};
+const TD      = {total_depth:.3f};
+const MH      = {module_height:.3f};
+const MD      = {module_depth:.3f};
+const HH      = {header_height:.3f};
+const HW      = {header_width:.3f};
+const SH      = {sludge_height:.3f};
+const SLACK   = {slack_amount:.3f};
+const FD      = {fiber_diameter_m:.5f};
+const VFC     = Math.max(8, Math.min(24, Math.floor(SW / 0.04)));
+const VFC_Z   = Math.max(4, Math.min(10, Math.floor(MD / 0.008)));
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x0d1117);
-scene.fog = new THREE.Fog(0x0d1117, 6, 25);
+scene.fog = new THREE.Fog(0x0d1117, 8, 30);
 
-const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.5, 30);
-camera.position.set({cam_x:.3f}, {cam_y:.3f}, {cam_z:.3f});
-camera.lookAt(SW / 2, FL / 2, 0);
+const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 50);
+camera.position.set(SW * 0.3, MH + 0.5, TD + 3.5);
+camera.lookAt(SW * 0.5, FL * 0.4, TD * 0.5);
 
 const renderer = new THREE.WebGLRenderer({{ antialias: true }});
 renderer.setSize(window.innerWidth, window.innerHeight);
@@ -577,134 +589,181 @@ renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 document.body.appendChild(renderer.domElement);
 
 const controls = new OrbitControls(camera, renderer.domElement);
-controls.target.set(SW / 2, FL / 2, 0);
+controls.target.set(SW * 0.5, FL * 0.4, TD * 0.5);
 controls.enableDamping = true;
-controls.dampingFactor = 0.08;
+controls.dampingFactor = 0.06;
+controls.minDistance = 1.0;
+controls.maxDistance = 20;
 controls.update();
 
-// 光照
-const ambient = new THREE.AmbientLight(0x404060, 1.2);
-scene.add(ambient);
-const dirLight = new THREE.DirectionalLight(0xffffff, 1.8);
-dirLight.position.set(5, 8, TD + 2);
-dirLight.castShadow = true;
-dirLight.shadow.mapSize.set(1024, 1024);
-scene.add(dirLight);
+// ---- 光照 ----
+scene.add(new THREE.AmbientLight(0x8090b0, 2.0));
+const sun = new THREE.DirectionalLight(0xffffff, 2.5);
+sun.position.set(TD + 4, MH + 3, TD + 3);
+sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048);
+scene.add(sun);
+const fillLight = new THREE.PointLight(0x4488cc, 1.0, 10);
+fillLight.position.set(SW * 0.5, FL * 0.5, TD * 0.5);
+scene.add(fillLight);
 
-// 网格地面
-const gridSize = Math.max(SW, TD) + 1;
-const grid = new THREE.GridHelper(gridSize, 20, 0x333344, 0x1a1a2e);
-grid.position.y = -0.01;
-grid.position.x = SW / 2;
-grid.position.z = TD / 2;
+// ---- 网格地面 ----
+const grid = new THREE.GridHelper(Math.max(SW, TD) + 2, 24, 0x334455, 0x1e2a38);
+grid.position.set(SW * 0.5, -0.01, TD * 0.5);
 scene.add(grid);
 
-// ========== 帘式中空纤维膜 ==========
-// 每个 membrane curtain 包含: 上集水管 + 下集水管 + 多根垂直中空纤维膜丝
+// ---- 材质定义 ----
+const caseMat   = new THREE.MeshStandardMaterial({{ color: 0xdddddd, metalness: 0.05, roughness: 0.6 }});
+const caseDarkMat = new THREE.MeshStandardMaterial({{ color: 0xcccccc, metalness: 0.1, roughness: 0.5 }});
+const fiberMat  = new THREE.MeshStandardMaterial({{ color: 0x4499ff, metalness: 0.02, roughness: 0.6, transparent: true, opacity: 0.82 }});
+const headerMat = new THREE.MeshStandardMaterial({{ color: 0x66aadd, metalness: 0.4, roughness: 0.3 }});
+const pipeMat   = new THREE.MeshStandardMaterial({{ color: 0xff8844, metalness: 0.4, roughness: 0.4 }});
+const sludgeMat = new THREE.MeshStandardMaterial({{ color: 0x775522, metalness: 0, roughness: 1.0, transparent: true, opacity: 0.45 }});
 
-const headerRadius = 0.018;
-const headerGeo = new THREE.CylinderGeometry(headerRadius, headerRadius, SW, 12);
-const headerMat = new THREE.MeshStandardMaterial({{ color: 0x66bbff, metalness: 0.5, roughness: 0.3 }});
+// 预生成膜丝几何体（复用，减少 draw call）
+const segs = 6;
+const segGeo = new THREE.CylinderGeometry(FD * 0.5, FD * 0.5, FL / segs, 5);
 
-// 膜丝材质（半透明蓝色，模拟中空纤维）
-const fiberMat = new THREE.MeshStandardMaterial({{ color: 0x4499ff, metalness: 0.05, roughness: 0.5, transparent: true, opacity: 0.75 }});
-const fiberGeoSegs = 6;  // 圆柱面数（细丝不需要太多）
-
+// ---- 逐个膜帘组件 ----
 for (let si = 0; si < SC; si++) {{
-  const sheetZ = si * (0.01 + SS);
+  const cz = si * (MD + SS);  // 当前帘的 Z 中心
+  const yTop = FL + 0.15;     // 上集水管中心 Y
 
-  // ---- 上集水管（顶部，X 方向）----
-  const topHeader = new THREE.Mesh(headerGeo, headerMat);
+  // ===== 白色膜壳（前后两块侧板 + 顶部封板，底部开放浸入污泥中）====
+  // 前板
+  const frontGeo = new THREE.BoxGeometry(SW, FL, 0.006);
+  const front = new THREE.Mesh(frontGeo, caseMat);
+  front.position.set(SW * 0.5, FL * 0.5, cz + MD * 0.5);
+  front.castShadow = true; front.receiveShadow = true;
+  scene.add(front);
+  // 后板
+  const back = new THREE.Mesh(frontGeo, caseMat);
+  back.position.set(SW * 0.5, FL * 0.5, cz - MD * 0.5);
+  back.castShadow = true; back.receiveShadow = true;
+  scene.add(back);
+  // 顶部封板
+  const topGeo = new THREE.BoxGeometry(SW, 0.012, MD);
+  const top = new THREE.Mesh(topGeo, caseMat);
+  top.position.set(SW * 0.5, yTop, cz);
+  scene.add(top);
+
+  // ===== 上部产水集水管（水平，X 方向，两侧突出壳体）====
+  const topHeaderGeo = new THREE.CylinderGeometry(HH * 0.5, HH * 0.5, SW + HW * 2, 14);
+  const topHeader = new THREE.Mesh(topHeaderGeo, headerMat);
   topHeader.rotation.z = Math.PI / 2;
-  topHeader.position.set(SW / 2, FL, sheetZ);
+  topHeader.position.set(SW * 0.5, yTop, cz);
   topHeader.castShadow = true;
   scene.add(topHeader);
 
-  // ---- 下集水管（底部，X 方向）----
-  const botHeader = new THREE.Mesh(headerGeo, headerMat);
+  // ===== 下部集水管（连接膜丝底部，Y=0 处）====
+  const botHeaderGeo = new THREE.CylinderGeometry(HH * 0.4, HH * 0.4, SW + HW * 0.5, 14);
+  const botHeader = new THREE.Mesh(botHeaderGeo, headerMat);
   botHeader.rotation.z = Math.PI / 2;
-  botHeader.position.set(SW / 2, 0, sheetZ);
-  botHeader.castShadow = true;
+  botHeader.position.set(SW * 0.5, 0.04, cz);
   scene.add(botHeader);
 
-  // ---- 中空纤维膜丝（垂直排列，略有随机弯曲模拟松弛）----
+  // ===== 两侧产水连接管（Z 方向，通向端部集管）====
+  const sideTubeGeo = new THREE.CylinderGeometry(HH * 0.35, HH * 0.35, MD * 0.5, 10);
+  for (let side = -1; side <= 1; side += 2) {{
+    const st = new THREE.Mesh(sideTubeGeo, headerMat);
+    st.rotation.x = Math.PI / 2;
+    st.position.set(side > 0 ? SW * 0.98 : SW * 0.02, yTop - HH * 0.3, cz + side * MD * 0.25);
+    scene.add(st);
+  }}
+
+  // ===== 中空纤维膜丝（密集垂直排列于壳体内）====
+  // 每帘：X 方向 VFC 根，Z 方向 VFC_Z 层
   for (let fi = 0; fi < VFC; fi++) {{
-    const fx = (fi + 0.5) / VFC * SW;
-    // 松弛产生的随机水平偏移
-    const bendX = (Math.random() - 0.5) * SLACK;
-    const bendZ = (Math.random() - 0.5) * SLACK * 0.5;
+    const fx = (fi + 0.3 + Math.random() * 0.4) / VFC * (SW - HW * 1.5) + HW * 0.75;
+    // 预计算该膜丝的弯曲偏移
+    const bx = (Math.random() - 0.5) * SLACK;
+    const bz = (Math.random() - 0.5) * SLACK * 0.4;
 
-    // 用多段短圆柱拼接成略有弯曲的膜丝
-    const segs = 6;
-    const segHeight = FL / segs;
-    const segGeo = new THREE.CylinderGeometry(FR, FR, segHeight, fiberGeoSegs);
+    for (let fz_i = 0; fz_i < VFC_Z; fz_i++) {{
+      const fz = cz - MD * 0.45 + (fz_i + 0.5) / VFC_Z * MD * 0.9;
 
-    for (let s = 0; s < segs; s++) {{
-      const t = (s + 0.5) / segs;
-      // 弯曲偏移曲线（中间最大，两端为0）
-      const curveFactor = Math.sin(t * Math.PI) * 0.6;
-      const sx = fx + bendX * curveFactor;
-      const sz = sheetZ + bendZ * curveFactor;
-      const sy = s * segHeight + segHeight / 2;
-
-      const seg = new THREE.Mesh(segGeo, fiberMat);
-      seg.position.set(sx, sy, sz);
-      seg.castShadow = true;
-      seg.receiveShadow = true;
-      scene.add(seg);
+      // 6 段拼接模拟轻微弧垂
+      for (let s = 0; s < segs; s++) {{
+        const t = (s + 0.5) / segs;
+        const curve = Math.sin(t * Math.PI);
+        const sy = s * (FL / segs) + (FL / segs) * 0.5;
+        const seg = new THREE.Mesh(segGeo, fiberMat);
+        seg.position.set(fx + bx * curve, sy, fz + bz * curve);
+        seg.castShadow = false;
+        seg.receiveShadow = true;
+        scene.add(seg);
+      }}
     }}
   }}
 }}
 
-// ---- 曝气管（每帘膜两侧下方各一根，X 方向）----
-const pipeMat = new THREE.MeshStandardMaterial({{ color: 0xff8844, metalness: 0.3, roughness: 0.5 }});
-const pipeGeo = new THREE.CylinderGeometry(0.025, 0.025, SW * 0.9, 16);
-for (let i = 0; i < SC; i++) {{
-  const sheetZ = i * (0.01 + SS);
-  for (let side = -1; side <= 1; side += 2) {{
-    const pipe = new THREE.Mesh(pipeGeo, pipeMat);
-    pipe.rotation.z = Math.PI / 2;
-    pipe.position.set(SW / 2, 0.12, sheetZ + side * PO);
-    pipe.castShadow = true;
-    scene.add(pipe);
+// ---- 曝气管（每帘底部，X 方向，多根细管）----
+const pipeR = 0.018;
+const pipeGeo = new THREE.CylinderGeometry(pipeR, pipeR, SW * 0.85, 10);
+for (let si = 0; si < SC; si++) {{
+  const cz = si * (MD + SS);
+  // 主管
+  const mainPipe = new THREE.Mesh(pipeGeo, pipeMat);
+  mainPipe.rotation.z = Math.PI / 2;
+  mainPipe.position.set(SW * 0.5, 0.08, cz);
+  mainPipe.castShadow = true;
+  scene.add(mainPipe);
+  // 曝气支管（垂直向上）
+  const brGeo = new THREE.CylinderGeometry(pipeR * 0.6, pipeR * 0.6, 0.15, 6);
+  for (let pi = 0; pi < 4; pi++) {{
+    const px = SW * 0.18 + pi * SW * 0.18;
+    const br = new THREE.Mesh(brGeo, pipeMat);
+    br.position.set(px, 0.15, cz);
+    scene.add(br);
   }}
 }}
 
-// ---- 污泥层（覆盖整个膜架底部区域）----
-const sludgeMat = new THREE.MeshStandardMaterial({{ color: 0x886633, metalness: 0, roughness: 0.9, transparent: true, opacity: 0.4 }});
-const sludgeGeo = new THREE.BoxGeometry(SW + 0.2, SH, TD + 0.2);
+// ---- 污泥层（底部平面）----
+const sludgeGeo = new THREE.BoxGeometry(SW * 1.1, SH, TD * 1.1);
 const sludge = new THREE.Mesh(sludgeGeo, sludgeMat);
-sludge.position.set(SW / 2, SH / 2, TD / 2);
+sludge.position.set(SW * 0.5, SH * 0.5, TD * 0.5);
 sludge.receiveShadow = true;
 scene.add(sludge);
 
-// ---- 气泡颗粒（在膜丝之间上升）----
-const bubbleMat = new THREE.MeshBasicMaterial({{ color: 0x88ddff, transparent: true, opacity: 0.55 }});
-const bubbleGeo = new THREE.SphereGeometry(0.012, 6, 6);
+// 污泥-水交界线
+const waterLineGeo = new THREE.BoxGeometry(SW * 1.1, 0.005, TD * 1.1);
+const waterMat = new THREE.MeshBasicMaterial({{ color: 0x1a4a6e, transparent: true, opacity: 0.3 }});
+const waterLine = new THREE.Mesh(waterLineGeo, waterMat);
+waterLine.position.set(SW * 0.5, SH, TD * 0.5);
+scene.add(waterLine);
+
+// ---- 气泡（从曝气管喷出，穿过膜丝间上升）----
+const bGeo = new THREE.SphereGeometry(0.008, 5, 5);
+const bMat = new THREE.MeshBasicMaterial({{ color: 0xaaddff, transparent: true, opacity: 0.5 }});
 const bubbles = [];
-for (let i = 0; i < 120; i++) {{
-  const b = new THREE.Mesh(bubbleGeo, bubbleMat);
+for (let i = 0; i < 150; i++) {{
+  const b = new THREE.Mesh(bGeo, bMat);
+  const si = Math.floor(Math.random() * SC);
   b.position.set(
-    Math.random() * SW,
-    Math.random() * SH,
-    Math.random() * TD
+    SW * 0.1 + Math.random() * SW * 0.8,
+    Math.random() * Math.max(SH, FL * 0.8),
+    si * (MD + SS) + Math.random() * MD
   );
-  b.userData = {{ speed: 0.3 + Math.random() * 0.7, offset: Math.random() * Math.PI * 2 }};
+  b.userData = {{ speed: 0.004 + Math.random() * 0.008, ox: b.position.x, oz: b.position.z, phase: Math.random() * Math.PI * 2 }};
   scene.add(b);
   bubbles.push(b);
 }}
 
-// 动画循环
+// 动画
 function animate(time) {{
   requestAnimationFrame(animate);
   const t = time * 0.001;
   bubbles.forEach(b => {{
-    b.position.y += b.userData.speed * 0.008;
-    b.position.x += Math.sin(t * 1.5 + b.userData.offset) * 0.0015;
-    if (b.position.y > SH) {{
+    b.position.y += b.userData.speed;
+    b.position.x = b.userData.ox + Math.sin(t * 2 + b.userData.phase) * 0.003;
+    b.position.z = b.userData.oz + Math.cos(t * 1.5 + b.userData.phase) * 0.002;
+    if (b.position.y > Math.max(SH, FL * 0.9)) {{
       b.position.y = 0;
-      b.position.x = Math.random() * SW;
-      b.position.z = Math.random() * TD;
+      const si = Math.floor(Math.random() * SC);
+      b.userData.oz = si * (MD + SS) + Math.random() * MD;
+      b.userData.ox = SW * 0.1 + Math.random() * SW * 0.8;
+      b.position.x = b.userData.ox;
+      b.position.z = b.userData.oz;
     }}
   }});
   controls.update();
