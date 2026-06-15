@@ -506,11 +506,15 @@ def generate_3d_html(sim: EnhancedMBRSimulator) -> str:
     sheet_spacing: float = sim.s_pitch / 1000.0  # mm -> m
     fiber_len: float = sim.f_len
     sludge_height: float = sim.sludge_level
-    max_sludge: float = PHYS.sludge_layer_max_height
     sludge_mm: float = sim.sludge_level * 1000.0
+    pipe_offset: float = PHYS.pipe_offset
 
-    # 计算膜架总尺寸
-    total_width: float = sheet_count * sheet_width + (sheet_count - 1) * sheet_spacing
+    # 膜片沿 Z 轴（深度方向）排列，每片在 XY 平面展开
+    total_depth: float = sheet_count * 0.03 + (sheet_count - 1) * sheet_spacing
+    half_depth: float = total_depth / 2.0
+    cam_x: float = sheet_width * 0.8
+    cam_y: float = fiber_len * 0.7
+    cam_z: float = total_depth + 2.5
 
     return f"""<!DOCTYPE html>
 <html lang="zh">
@@ -526,7 +530,7 @@ def generate_3d_html(sim: EnhancedMBRSimulator) -> str:
 <body>
 <div id="info">
   <b>MBR 膜架 3D 视图</b><br>
-  膜丝外径: {sim.fiber_diameter} mm | 污泥层: {sludge_mm:.0f} mm
+  膜丝外径: {sim.fiber_diameter} mm | 污泥层: {sludge_mm:.0f} mm | 膜片间距: {sim.s_pitch} mm
 </div>
 <div class="legend">
   <span style="background:#3388ff"></span> 膜片 &nbsp;
@@ -541,13 +545,21 @@ def generate_3d_html(sim: EnhancedMBRSimulator) -> str:
 import * as THREE from 'three';
 import {{ OrbitControls }} from 'three/addons/controls/OrbitControls.js';
 
+const SW = {sheet_width:.3f};
+const FL = {fiber_len:.3f};
+const SS = {sheet_spacing:.3f};
+const SC = {sheet_count};
+const PO = {pipe_offset:.3f};
+const TD = {total_depth:.3f};
+const SH = {sludge_height:.3f};
+
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x0d1117);
-scene.fog = new THREE.Fog(0x0d1117, 5, 20);
+scene.fog = new THREE.Fog(0x0d1117, 6, 25);
 
 const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.5, 30);
-camera.position.set(4, 2.5, 5);
-camera.lookAt({total_width / 2:.3f}, 0.5, 0);
+camera.position.set({cam_x:.3f}, {cam_y:.3f}, {cam_z:.3f});
+camera.lookAt(SW / 2, FL / 2, 0);
 
 const renderer = new THREE.WebGLRenderer({{ antialias: true }});
 renderer.setSize(window.innerWidth, window.innerHeight);
@@ -556,7 +568,7 @@ renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 document.body.appendChild(renderer.domElement);
 
 const controls = new OrbitControls(camera, renderer.domElement);
-controls.target.set({total_width / 2:.3f}, 0.5, 0);
+controls.target.set(SW / 2, FL / 2, 0);
 controls.enableDamping = true;
 controls.dampingFactor = 0.08;
 controls.update();
@@ -565,47 +577,51 @@ controls.update();
 const ambient = new THREE.AmbientLight(0x404060, 1.2);
 scene.add(ambient);
 const dirLight = new THREE.DirectionalLight(0xffffff, 1.8);
-dirLight.position.set(5, 8, 3);
+dirLight.position.set(5, 8, TD + 2);
 dirLight.castShadow = true;
 dirLight.shadow.mapSize.set(1024, 1024);
 scene.add(dirLight);
 
 // 网格地面
-const grid = new THREE.GridHelper({total_width + 1:.2f}, 20, 0x333344, 0x1a1a2e);
+const gridSize = Math.max(SW, TD) + 1;
+const grid = new THREE.GridHelper(gridSize, 20, 0x333344, 0x1a1a2e);
 grid.position.y = -0.01;
+grid.position.x = SW / 2;
+grid.position.z = TD / 2;
 scene.add(grid);
 
-// ---- 膜片 ----
+// ---- 膜片（沿 Z 轴排列，XY 平面展开）----
 const sheetMat = new THREE.MeshStandardMaterial({{ color: 0x3388ff, metalness: 0.1, roughness: 0.4, transparent: true, opacity: 0.85 }});
-for (let i = 0; i < {sheet_count}; i++) {{
-  const x = i * ({sheet_width:.3f} + {sheet_spacing:.3f});
-  const geo = new THREE.BoxGeometry({sheet_width:.3f}, {fiber_len:.3f}, 0.03);
-  const sheet = new THREE.Mesh(geo, sheetMat);
-  sheet.position.set(x + {sheet_width:.3f} / 2, {fiber_len:.3f} / 2, 0);
+// 膜片: 宽(X) = sheet_width, 高(Y) = fiber_len, 厚(Z) = 0.03
+const sheetGeo = new THREE.BoxGeometry(SW, FL, 0.03);
+for (let i = 0; i < SC; i++) {{
+  const sheetZ = i * (0.03 + SS);
+  const sheet = new THREE.Mesh(sheetGeo, sheetMat);
+  sheet.position.set(SW / 2, FL / 2, sheetZ);
   sheet.castShadow = true;
   sheet.receiveShadow = true;
   scene.add(sheet);
 }}
 
-// ---- 曝气管 ----
+// ---- 曝气管（沿 X 方向横穿每片膜片底部）----
 const pipeMat = new THREE.MeshStandardMaterial({{ color: 0xff8844, metalness: 0.3, roughness: 0.5 }});
-const pipeGeo = new THREE.CylinderGeometry(0.03, 0.03, {total_width:.3f} * 0.9, 16);
-for (let i = 0; i < {sheet_count}; i++) {{
-  const x = i * ({sheet_width:.3f} + {sheet_spacing:.3f}) + {sheet_width:.3f} / 2;
+const pipeGeo = new THREE.CylinderGeometry(0.03, 0.03, SW * 0.9, 16);
+for (let i = 0; i < SC; i++) {{
+  const sheetZ = i * (0.03 + SS);
   for (let side = -1; side <= 1; side += 2) {{
     const pipe = new THREE.Mesh(pipeGeo, pipeMat);
     pipe.rotation.z = Math.PI / 2;
-    pipe.position.set(x, 0.15, side * {PHYS.pipe_offset:.3f});
+    pipe.position.set(SW / 2, 0.15, sheetZ + side * PO);
     pipe.castShadow = true;
     scene.add(pipe);
   }}
 }}
 
-// ---- 污泥层 ----
+// ---- 污泥层（覆盖整个膜架底部区域）----
 const sludgeMat = new THREE.MeshStandardMaterial({{ color: 0x886633, metalness: 0, roughness: 0.9, transparent: true, opacity: 0.4 }});
-const sludgeGeo = new THREE.BoxGeometry({total_width + 0.2:.2f}, {sludge_height:.3f}, 2.0);
+const sludgeGeo = new THREE.BoxGeometry(SW + 0.2, SH, TD + 0.2);
 const sludge = new THREE.Mesh(sludgeGeo, sludgeMat);
-sludge.position.set({total_width / 2:.3f}, {sludge_height / 2:.3f}, 0);
+sludge.position.set(SW / 2, SH / 2, TD / 2);
 sludge.receiveShadow = true;
 scene.add(sludge);
 
@@ -613,12 +629,12 @@ scene.add(sludge);
 const bubbleMat = new THREE.MeshBasicMaterial({{ color: 0x66ccff, transparent: true, opacity: 0.6 }});
 const bubbleGeo = new THREE.SphereGeometry(0.015, 8, 8);
 const bubbles = [];
-for (let i = 0; i < 80; i++) {{
+for (let i = 0; i < 100; i++) {{
   const b = new THREE.Mesh(bubbleGeo, bubbleMat);
   b.position.set(
-    Math.random() * {total_width:.2f},
-    Math.random() * {sludge_height:.2f},
-    (Math.random() - 0.5) * 1.8
+    Math.random() * SW,
+    Math.random() * SH,
+    Math.random() * TD
   );
   b.userData = {{ speed: 0.3 + Math.random() * 0.7, offset: Math.random() * Math.PI * 2 }};
   scene.add(b);
@@ -632,9 +648,10 @@ function animate(time) {{
   bubbles.forEach(b => {{
     b.position.y += b.userData.speed * 0.008;
     b.position.x += Math.sin(t * 2 + b.userData.offset) * 0.002;
-    if (b.position.y > {sludge_height:.2f}) {{
+    if (b.position.y > SH) {{
       b.position.y = 0;
-      b.position.x = Math.random() * {total_width:.2f};
+      b.position.x = Math.random() * SW;
+      b.position.z = Math.random() * TD;
     }}
   }});
   controls.update();
