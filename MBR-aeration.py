@@ -91,6 +91,7 @@ class Preset:
     srt: int
     settling_rate: float
     return_ratio: int
+    pipe_to_membrane_gap: int
 
 
 PRESETS: Dict[str, Preset] = {
@@ -100,6 +101,7 @@ PRESETS: Dict[str, Preset] = {
         h_size=6.0, f_len=2.0, slack=0.008, mode=AerationMode.CONTINUOUS,
         fiber_diameter=2.8, thickness=30, mlss=6000, srt=20,
         settling_rate=2.0, return_ratio=80,
+        pipe_to_membrane_gap=400,
     ),
     "balanced": Preset(
         name="balanced", label="均衡模式", icon="⚖️",
@@ -107,6 +109,7 @@ PRESETS: Dict[str, Preset] = {
         h_size=4.0, f_len=2.0, slack=0.015, mode=AerationMode.CONTINUOUS,
         fiber_diameter=1.65, thickness=30, mlss=8000, srt=15,
         settling_rate=2.5, return_ratio=100,
+        pipe_to_membrane_gap=250,
     ),
     "flush": Preset(
         name="flush", label="高冲刷模式", icon="💨",
@@ -114,6 +117,7 @@ PRESETS: Dict[str, Preset] = {
         h_size=2.5, f_len=2.0, slack=0.025, mode=AerationMode.PULSE,
         fiber_diameter=1.65, thickness=30, mlss=10000, srt=12,
         settling_rate=3.0, return_ratio=150,
+        pipe_to_membrane_gap=150,
     ),
     "low_fouling": Preset(
         name="low_fouling", label="低污染模式", icon="🛡️",
@@ -121,6 +125,7 @@ PRESETS: Dict[str, Preset] = {
         h_size=3.0, f_len=2.0, slack=0.02, mode=AerationMode.PULSE,
         fiber_diameter=1.65, thickness=40, mlss=6000, srt=25,
         settling_rate=2.0, return_ratio=120,
+        pipe_to_membrane_gap=300,
     ),
     "high_flux": Preset(
         name="high_flux", label="高通量模式", icon="⚡",
@@ -128,6 +133,7 @@ PRESETS: Dict[str, Preset] = {
         h_size=2.0, f_len=2.5, slack=0.03, mode=AerationMode.PULSE,
         fiber_diameter=1.65, thickness=25, mlss=12000, srt=10,
         settling_rate=3.5, return_ratio=200,
+        pipe_to_membrane_gap=150,
     ),
 }
 
@@ -253,6 +259,7 @@ class EnhancedMBRSimulator:
         self.settling_rate: float = 3.0
         self.return_ratio: int = 150
         self.mode: AerationMode = AerationMode.PULSE
+        self.pipe_to_membrane_gap: int = 200  # 曝气管到膜片底部距离 (mm)
 
         self.sludge_level: float = 0.15
         self.is_discharging: bool = False
@@ -272,7 +279,8 @@ class EnhancedMBRSimulator:
         preset = PRESETS[name]
         for key in ("intensity", "pulse_period", "p_pitch", "s_pitch", "h_size",
                      "f_len", "slack", "mode", "fiber_diameter", "thickness",
-                     "mlss", "srt", "settling_rate", "return_ratio"):
+                     "mlss", "srt", "settling_rate", "return_ratio",
+                     "pipe_to_membrane_gap"):
             setattr(self, key, getattr(preset, key))
 
     # ----- 几何计算 -----
@@ -449,13 +457,15 @@ class EnhancedMBRSimulator:
             "sim_time": self.sim_time,
             "fouling": self.fouling.get_state(),
             "is_discharging": self.is_discharging,
+            "pipe_to_membrane_gap": self.pipe_to_membrane_gap,
         }
 
     def load_state_snapshot(self, snap: Dict) -> None:
         """从状态快照恢复。"""
         for key in ("intensity", "pulse_period", "p_pitch", "s_pitch", "h_size",
                      "slack", "mlss", "settling_rate", "return_ratio",
-                     "sludge_level", "sim_time", "is_discharging"):
+                     "sludge_level", "sim_time", "is_discharging",
+                     "pipe_to_membrane_gap"):
             if key in snap:
                 setattr(self, key, snap[key])
         if "mode" in snap:
@@ -509,6 +519,7 @@ def generate_3d_html(sim: EnhancedMBRSimulator) -> str:
     fiber_diameter_m: float = sim.fiber_diameter / 1000.0
     sludge_height: float = sim.sludge_level
     sludge_mm: float = sim.sludge_level * 1000.0
+    pipe_gap: float = sim.pipe_to_membrane_gap / 1000.0  # mm -> m
     pipe_offset: float = PHYS.pipe_offset
     slack_amount: float = sim.slack * 1.5   # 膜丝松弛程度
 
@@ -569,6 +580,7 @@ const MD      = {module_depth:.3f};
 const HH      = {header_height:.3f};
 const HW      = {header_width:.3f};
 const SH      = {sludge_height:.3f};
+const PG      = {pipe_gap:.3f};
 const SLACK   = {slack_amount:.3f};
 const FD      = {fiber_diameter_m:.5f};
 const VFC     = 6;   // X 方向膜丝数（示意）
@@ -578,9 +590,11 @@ const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x0d1117);
 scene.fog = new THREE.Fog(0x0d1117, 8, 30);
 
+const bottomY = -(PG + 0.3);  // 池底坐标
+
 const camera = new THREE.PerspectiveCamera(45, 1.6, 0.1, 50);
-camera.position.set(SW * 0.3, MH + 0.5, TD + 3.5);
-camera.lookAt(SW * 0.5, FL * 0.4, TD * 0.5);
+camera.position.set(SW * 0.3, MH * 0.5, TD + 3.5);
+camera.lookAt(SW * 0.5, FL * 0.3, TD * 0.5);
 
 const renderer = new THREE.WebGLRenderer({{ antialias: true }});
 renderer.setSize(window.innerWidth, window.innerHeight);
@@ -588,7 +602,7 @@ renderer.shadowMap.enabled = false;
 document.body.appendChild(renderer.domElement);
 
 const controls = new OrbitControls(camera, renderer.domElement);
-controls.target.set(SW * 0.5, FL * 0.4, TD * 0.5);
+controls.target.set(SW * 0.5, FL * 0.3, TD * 0.5);
 controls.enableDamping = true;
 controls.dampingFactor = 0.06;
 controls.minDistance = 1.0;
@@ -604,9 +618,9 @@ const fillLight = new THREE.PointLight(0x4488cc, 1.0, 10);
 fillLight.position.set(SW * 0.5, FL * 0.5, TD * 0.5);
 scene.add(fillLight);
 
-// ---- 网格地面 ----
+// ---- 网格地面（池底）----
 const grid = new THREE.GridHelper(Math.max(SW, TD) + 2, 24, 0x334455, 0x1e2a38);
-grid.position.set(SW * 0.5, -0.01, TD * 0.5);
+grid.position.set(SW * 0.5, bottomY - 0.01, TD * 0.5);
 scene.add(grid);
 
 // ---- 材质定义 ----
@@ -692,31 +706,33 @@ for (let si = 0; si < SC; si++) {{
   scene.add(fiberMesh);
 }}
 
-// ---- 曝气管（每帘底部，X 方向，多根细管）----
+// ---- 曝气管（膜片下方，距离可调）----
 const pipeR = 0.018;
 const pipeGeo = new THREE.CylinderGeometry(pipeR, pipeR, SW * 0.85, 10);
+const pipeY = -PG;  // 膜片底部(Y=0)下方 pipe_gap 处
 for (let si = 0; si < SC; si++) {{
   const cz = si * (MD + SS);
   // 主管
   const mainPipe = new THREE.Mesh(pipeGeo, pipeMat);
   mainPipe.rotation.z = Math.PI / 2;
-  mainPipe.position.set(SW * 0.5, 0.08, cz);
-  mainPipe.castShadow = true;
+  mainPipe.position.set(SW * 0.5, pipeY, cz);
   scene.add(mainPipe);
-  // 曝气支管（垂直向上）
-  const brGeo = new THREE.CylinderGeometry(pipeR * 0.6, pipeR * 0.6, 0.15, 6);
+  // 曝气支管（从主管向上喷向膜丝底部）
+  const brGeo = new THREE.CylinderGeometry(pipeR * 0.5, pipeR * 0.5, PG * 0.7, 6);
   for (let pi = 0; pi < 4; pi++) {{
     const px = SW * 0.18 + pi * SW * 0.18;
     const br = new THREE.Mesh(brGeo, pipeMat);
-    br.position.set(px, 0.15, cz);
+    br.position.set(px, pipeY + PG * 0.35, cz);
     scene.add(br);
   }}
 }}
 
-// ---- 污泥层（底部平面）----
+// ---- 污泥层（从池底向上堆至泥水分界面）----
+const sludgeTopY = bottomY + SH;  // 污泥层顶面
+const midY = (bottomY + sludgeTopY) / 2;
 const sludgeGeo = new THREE.BoxGeometry(SW * 1.1, SH, TD * 1.1);
 const sludge = new THREE.Mesh(sludgeGeo, sludgeMat);
-sludge.position.set(SW * 0.5, SH * 0.5, TD * 0.5);
+sludge.position.set(SW * 0.5, midY, TD * 0.5);
 sludge.receiveShadow = true;
 scene.add(sludge);
 
@@ -724,19 +740,21 @@ scene.add(sludge);
 const waterLineGeo = new THREE.BoxGeometry(SW * 1.1, 0.005, TD * 1.1);
 const waterMat = new THREE.MeshBasicMaterial({{ color: 0x1a4a6e, transparent: true, opacity: 0.3 }});
 const waterLine = new THREE.Mesh(waterLineGeo, waterMat);
-waterLine.position.set(SW * 0.5, SH, TD * 0.5);
+waterLine.position.set(SW * 0.5, sludgeTopY, TD * 0.5);
 scene.add(waterLine);
 
 // ---- 气泡（从曝气管喷出，穿过膜丝间上升）----
 const bGeo = new THREE.SphereGeometry(0.008, 5, 5);
 const bMat = new THREE.MeshBasicMaterial({{ color: 0xaaddff, transparent: true, opacity: 0.5 }});
 const bubbles = [];
+const bubbleMaxY = FL + 0.15;  // 气泡升到膜片顶部以上
+const bubbleMinY = pipeY;      // 气泡从曝气管处产生
 for (let i = 0; i < 50; i++) {{
   const b = new THREE.Mesh(bGeo, bMat);
   const si = Math.floor(Math.random() * SC);
   b.position.set(
     SW * 0.1 + Math.random() * SW * 0.8,
-    Math.random() * Math.max(SH, FL * 0.8),
+    bubbleMinY + Math.random() * (bubbleMaxY - bubbleMinY),
     si * (MD + SS) + Math.random() * MD
   );
   b.userData = {{ speed: 0.004 + Math.random() * 0.008, ox: b.position.x, oz: b.position.z, phase: Math.random() * Math.PI * 2 }};
@@ -752,8 +770,8 @@ function animate(time) {{
     b.position.y += b.userData.speed;
     b.position.x = b.userData.ox + Math.sin(t * 2 + b.userData.phase) * 0.003;
     b.position.z = b.userData.oz + Math.cos(t * 1.5 + b.userData.phase) * 0.002;
-    if (b.position.y > Math.max(SH, FL * 0.9)) {{
-      b.position.y = 0;
+    if (b.position.y > bubbleMaxY) {{
+      b.position.y = bubbleMinY;
       const si = Math.floor(Math.random() * SC);
       b.userData.oz = si * (MD + SS) + Math.random() * MD;
       b.userData.ox = SW * 0.1 + Math.random() * SW * 0.8;
@@ -819,6 +837,7 @@ def render_sidebar(sim: EnhancedMBRSimulator) -> None:
             sim.pulse_period = st.slider("脉冲周期 (s)", 2.0, 8.0, float(sim.pulse_period), step=0.5)
         sim.h_size = st.slider("曝气孔径 (mm)", 1.0, 15.0, float(sim.h_size), step=0.5)
         sim.p_pitch = st.slider("曝气管间距 (mm)", 30, 300, int(sim.p_pitch), step=10)
+        sim.pipe_to_membrane_gap = st.slider("曝气-膜片距离 (mm)", 100, 500, int(sim.pipe_to_membrane_gap), step=10)
 
         st.divider()
 
