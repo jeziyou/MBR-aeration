@@ -533,12 +533,14 @@ def generate_3d_html(sim: EnhancedMBRSimulator) -> str:
 <meta charset="UTF-8">
 <style>
   body {{ margin: 0; overflow: hidden; background: #0d1117; font-family: sans-serif; }}
-  #info {{ position: absolute; top: 10px; left: 20px; color: #c9d1d9; font-size: 13px; line-height: 1.6; }}
-  .legend {{ position: absolute; bottom: 20px; right: 20px; color: #8b949e; font-size: 12px; background: rgba(13,17,23,0.7); padding: 8px 12px; border-radius: 4px; }}
+  #container {{ width: 100%; height: 520px; position: relative; overflow: hidden; }}
+  #info {{ position: absolute; top: 10px; left: 20px; color: #c9d1d9; font-size: 13px; line-height: 1.6; z-index: 10; }}
+  .legend {{ position: absolute; bottom: 20px; right: 20px; color: #8b949e; font-size: 12px; background: rgba(13,17,23,0.7); padding: 8px 12px; border-radius: 4px; z-index: 10; }}
   .legend span {{ display: inline-block; width: 12px; height: 12px; margin-right: 4px; border-radius: 2px; vertical-align: middle; }}
 </style>
 </head>
 <body>
+<div id="container">
 <div id="info">
   <b>MBR 帘式膜组件 3D 视图</b><br>
   膜丝外径: {sim.fiber_diameter} mm | 膜丝长: {fiber_len:.2f} m | 帘数: {sheet_count} | 间距: {sim.s_pitch} mm<br>
@@ -578,14 +580,15 @@ const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x0d1117);
 scene.fog = new THREE.Fog(0x0d1117, 8, 30);
 
-const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 50);
+const camera = new THREE.PerspectiveCamera(45, 1.6, 0.1, 50);
 camera.position.set(SW * 0.3, MH + 0.5, TD + 3.5);
 camera.lookAt(SW * 0.5, FL * 0.4, TD * 0.5);
 
 const renderer = new THREE.WebGLRenderer({{ antialias: true }});
-renderer.setSize(window.innerWidth, window.innerHeight);
+const container = document.getElementById('container');
+renderer.setSize(container.clientWidth, container.clientHeight);
 renderer.shadowMap.enabled = false;
-document.body.appendChild(renderer.domElement);
+container.appendChild(renderer.domElement);
 
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.target.set(SW * 0.5, FL * 0.4, TD * 0.5);
@@ -767,11 +770,14 @@ function animate(time) {{
 requestAnimationFrame(animate);
 
 window.addEventListener('resize', () => {{
-  camera.aspect = window.innerWidth / window.innerHeight;
+  const w = container.clientWidth;
+  const h = container.clientHeight;
+  camera.aspect = w / h;
   camera.updateProjectionMatrix();
-  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.setSize(w, h);
 }});
 </script>
+</div>
 </body>
 </html>"""
 
@@ -1082,7 +1088,7 @@ def main() -> None:
     # 3D 可视化
     st.markdown("### 🖥️ 3D 可视化视图")
     html_code: str = generate_3d_html(sim)
-    st.components.v1.html(html_code, height=600, scrolling=False)
+    st.html(html_code)
 
     # 趋势预测
     render_trend_chart(sim)
