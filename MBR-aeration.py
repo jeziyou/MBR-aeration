@@ -533,14 +533,12 @@ def generate_3d_html(sim: EnhancedMBRSimulator) -> str:
 <meta charset="UTF-8">
 <style>
   body {{ margin: 0; overflow: hidden; background: #0d1117; font-family: sans-serif; }}
-  #container {{ width: 100%; height: 520px; position: relative; overflow: hidden; }}
   #info {{ position: absolute; top: 10px; left: 20px; color: #c9d1d9; font-size: 13px; line-height: 1.6; z-index: 10; }}
   .legend {{ position: absolute; bottom: 20px; right: 20px; color: #8b949e; font-size: 12px; background: rgba(13,17,23,0.7); padding: 8px 12px; border-radius: 4px; z-index: 10; }}
   .legend span {{ display: inline-block; width: 12px; height: 12px; margin-right: 4px; border-radius: 2px; vertical-align: middle; }}
 </style>
 </head>
 <body>
-<div id="container">
 <div id="info">
   <b>MBR 帘式膜组件 3D 视图</b><br>
   膜丝外径: {sim.fiber_diameter} mm | 膜丝长: {fiber_len:.2f} m | 帘数: {sheet_count} | 间距: {sim.s_pitch} mm<br>
@@ -585,10 +583,9 @@ camera.position.set(SW * 0.3, MH + 0.5, TD + 3.5);
 camera.lookAt(SW * 0.5, FL * 0.4, TD * 0.5);
 
 const renderer = new THREE.WebGLRenderer({{ antialias: true }});
-const container = document.getElementById('container');
-renderer.setSize(container.clientWidth, container.clientHeight);
+renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.shadowMap.enabled = false;
-container.appendChild(renderer.domElement);
+document.body.appendChild(renderer.domElement);
 
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.target.set(SW * 0.5, FL * 0.4, TD * 0.5);
@@ -770,14 +767,11 @@ function animate(time) {{
 requestAnimationFrame(animate);
 
 window.addEventListener('resize', () => {{
-  const w = container.clientWidth;
-  const h = container.clientHeight;
-  camera.aspect = w / h;
+  camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
-  renderer.setSize(w, h);
+  renderer.setSize(window.innerWidth, window.innerHeight);
 }});
 </script>
-</div>
 </body>
 </html>"""
 
@@ -1088,7 +1082,7 @@ def main() -> None:
     # 3D 可视化
     st.markdown("### 🖥️ 3D 可视化视图")
     html_code: str = generate_3d_html(sim)
-    st.html(html_code)
+    st.components.v1.html(html_code, height=600, scrolling=False)
 
     # 趋势预测
     render_trend_chart(sim)
