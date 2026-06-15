@@ -509,9 +509,14 @@ def generate_3d_html(sim: EnhancedMBRSimulator) -> str:
     sludge_mm: float = sim.sludge_level * 1000.0
     pipe_offset: float = PHYS.pipe_offset
 
-    # 膜片沿 Z 轴（深度方向）排列，每片在 XY 平面展开
-    total_depth: float = sheet_count * 0.03 + (sheet_count - 1) * sheet_spacing
-    half_depth: float = total_depth / 2.0
+    # 帘式中空纤维膜：沿 Z 轴排列，每帘由多根垂直中空纤维膜丝组成
+    fiber_diameter_m: float = sim.fiber_diameter / 1000.0  # mm -> m
+    # 视觉上每帘显示膜丝数量（实际成千上万，此处示意）
+    visual_fiber_count: int = min(30, max(8, int(sheet_width / (fiber_diameter_m * 8))))
+    fiber_radius: float = max(0.002, fiber_diameter_m / 2.0)  # 视觉最小半径
+    slack_amount: float = sim.slack * 2.0  # 松弛度 → 膜丝弯曲幅度
+
+    total_depth: float = sheet_count * 0.01 + (sheet_count - 1) * sheet_spacing
     cam_x: float = sheet_width * 0.8
     cam_y: float = fiber_len * 0.7
     cam_z: float = total_depth + 2.5
@@ -529,11 +534,12 @@ def generate_3d_html(sim: EnhancedMBRSimulator) -> str:
 </head>
 <body>
 <div id="info">
-  <b>MBR 膜架 3D 视图</b><br>
-  膜丝外径: {sim.fiber_diameter} mm | 污泥层: {sludge_mm:.0f} mm | 膜片间距: {sim.s_pitch} mm
+  <b>MBR 帘式中空纤维膜 3D 视图</b><br>
+  膜丝外径: {sim.fiber_diameter} mm | 膜丝长度: {fiber_len:.1f} m | 污泥层: {sludge_mm:.0f} mm
 </div>
 <div class="legend">
-  <span style="background:#3388ff"></span> 膜片 &nbsp;
+  <span style="background:#4499ff"></span> 中空纤维膜丝 &nbsp;
+  <span style="background:#66bbff"></span> 集水管 &nbsp;
   <span style="background:#ff8844"></span> 曝气管 &nbsp;
   <span style="background:#886633;opacity:0.5"></span> 污泥层
 </div>
@@ -552,6 +558,9 @@ const SC = {sheet_count};
 const PO = {pipe_offset:.3f};
 const TD = {total_depth:.3f};
 const SH = {sludge_height:.3f};
+const VFC = {visual_fiber_count};
+const FR = {fiber_radius:.4f};
+const SLACK = {slack_amount:.3f};
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x0d1117);
@@ -590,28 +599,72 @@ grid.position.x = SW / 2;
 grid.position.z = TD / 2;
 scene.add(grid);
 
-// ---- 膜片（沿 Z 轴排列，XY 平面展开）----
-const sheetMat = new THREE.MeshStandardMaterial({{ color: 0x3388ff, metalness: 0.1, roughness: 0.4, transparent: true, opacity: 0.85 }});
-// 膜片: 宽(X) = sheet_width, 高(Y) = fiber_len, 厚(Z) = 0.03
-const sheetGeo = new THREE.BoxGeometry(SW, FL, 0.03);
-for (let i = 0; i < SC; i++) {{
-  const sheetZ = i * (0.03 + SS);
-  const sheet = new THREE.Mesh(sheetGeo, sheetMat);
-  sheet.position.set(SW / 2, FL / 2, sheetZ);
-  sheet.castShadow = true;
-  sheet.receiveShadow = true;
-  scene.add(sheet);
+// ========== 帘式中空纤维膜 ==========
+// 每个 membrane curtain 包含: 上集水管 + 下集水管 + 多根垂直中空纤维膜丝
+
+const headerRadius = 0.018;
+const headerGeo = new THREE.CylinderGeometry(headerRadius, headerRadius, SW, 12);
+const headerMat = new THREE.MeshStandardMaterial({{ color: 0x66bbff, metalness: 0.5, roughness: 0.3 }});
+
+// 膜丝材质（半透明蓝色，模拟中空纤维）
+const fiberMat = new THREE.MeshStandardMaterial({{ color: 0x4499ff, metalness: 0.05, roughness: 0.5, transparent: true, opacity: 0.75 }});
+const fiberGeoSegs = 6;  // 圆柱面数（细丝不需要太多）
+
+for (let si = 0; si < SC; si++) {{
+  const sheetZ = si * (0.01 + SS);
+
+  // ---- 上集水管（顶部，X 方向）----
+  const topHeader = new THREE.Mesh(headerGeo, headerMat);
+  topHeader.rotation.z = Math.PI / 2;
+  topHeader.position.set(SW / 2, FL, sheetZ);
+  topHeader.castShadow = true;
+  scene.add(topHeader);
+
+  // ---- 下集水管（底部，X 方向）----
+  const botHeader = new THREE.Mesh(headerGeo, headerMat);
+  botHeader.rotation.z = Math.PI / 2;
+  botHeader.position.set(SW / 2, 0, sheetZ);
+  botHeader.castShadow = true;
+  scene.add(botHeader);
+
+  // ---- 中空纤维膜丝（垂直排列，略有随机弯曲模拟松弛）----
+  for (let fi = 0; fi < VFC; fi++) {{
+    const fx = (fi + 0.5) / VFC * SW;
+    // 松弛产生的随机水平偏移
+    const bendX = (Math.random() - 0.5) * SLACK;
+    const bendZ = (Math.random() - 0.5) * SLACK * 0.5;
+
+    // 用多段短圆柱拼接成略有弯曲的膜丝
+    const segs = 6;
+    const segHeight = FL / segs;
+    const segGeo = new THREE.CylinderGeometry(FR, FR, segHeight, fiberGeoSegs);
+
+    for (let s = 0; s < segs; s++) {{
+      const t = (s + 0.5) / segs;
+      // 弯曲偏移曲线（中间最大，两端为0）
+      const curveFactor = Math.sin(t * Math.PI) * 0.6;
+      const sx = fx + bendX * curveFactor;
+      const sz = sheetZ + bendZ * curveFactor;
+      const sy = s * segHeight + segHeight / 2;
+
+      const seg = new THREE.Mesh(segGeo, fiberMat);
+      seg.position.set(sx, sy, sz);
+      seg.castShadow = true;
+      seg.receiveShadow = true;
+      scene.add(seg);
+    }}
+  }}
 }}
 
-// ---- 曝气管（沿 X 方向横穿每片膜片底部）----
+// ---- 曝气管（每帘膜两侧下方各一根，X 方向）----
 const pipeMat = new THREE.MeshStandardMaterial({{ color: 0xff8844, metalness: 0.3, roughness: 0.5 }});
-const pipeGeo = new THREE.CylinderGeometry(0.03, 0.03, SW * 0.9, 16);
+const pipeGeo = new THREE.CylinderGeometry(0.025, 0.025, SW * 0.9, 16);
 for (let i = 0; i < SC; i++) {{
-  const sheetZ = i * (0.03 + SS);
+  const sheetZ = i * (0.01 + SS);
   for (let side = -1; side <= 1; side += 2) {{
     const pipe = new THREE.Mesh(pipeGeo, pipeMat);
     pipe.rotation.z = Math.PI / 2;
-    pipe.position.set(SW / 2, 0.15, sheetZ + side * PO);
+    pipe.position.set(SW / 2, 0.12, sheetZ + side * PO);
     pipe.castShadow = true;
     scene.add(pipe);
   }}
@@ -625,11 +678,11 @@ sludge.position.set(SW / 2, SH / 2, TD / 2);
 sludge.receiveShadow = true;
 scene.add(sludge);
 
-// ---- 气泡颗粒 ----
-const bubbleMat = new THREE.MeshBasicMaterial({{ color: 0x66ccff, transparent: true, opacity: 0.6 }});
-const bubbleGeo = new THREE.SphereGeometry(0.015, 8, 8);
+// ---- 气泡颗粒（在膜丝之间上升）----
+const bubbleMat = new THREE.MeshBasicMaterial({{ color: 0x88ddff, transparent: true, opacity: 0.55 }});
+const bubbleGeo = new THREE.SphereGeometry(0.012, 6, 6);
 const bubbles = [];
-for (let i = 0; i < 100; i++) {{
+for (let i = 0; i < 120; i++) {{
   const b = new THREE.Mesh(bubbleGeo, bubbleMat);
   b.position.set(
     Math.random() * SW,
@@ -647,7 +700,7 @@ function animate(time) {{
   const t = time * 0.001;
   bubbles.forEach(b => {{
     b.position.y += b.userData.speed * 0.008;
-    b.position.x += Math.sin(t * 2 + b.userData.offset) * 0.002;
+    b.position.x += Math.sin(t * 1.5 + b.userData.offset) * 0.0015;
     if (b.position.y > SH) {{
       b.position.y = 0;
       b.position.x = Math.random() * SW;
