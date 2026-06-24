@@ -128,6 +128,10 @@ class PhysicsConstants:
     # ---- Critical Flux (Field et al, 1995) ----
     J_crit_default: float = 30.0  # LMH 临界通量
     J_sustainable_ratio: float = 0.67  # (Xu et al, 2023)
+    K_lim_default: float = 0.05  # K_Lim 基准值 (Jun & Daigger, 2024)
+    # K_Lim 影响因子
+    K_lim_eps_factor: float = 0.3   # EPS 每增加 50mg/gVSS, K_Lim 降低 30%
+    K_lim_mlss_factor: float = 0.2  # MLSS 每增加 4g/L, K_Lim 降低 20%
 
     # ---- 行业基准 ----
     energy_benchmark_low: float = 0.5   # kWh/m³
@@ -247,6 +251,7 @@ class SimulationMetrics:
     Rc: float = 0.0
     Rp: float = 0.0
     R_irr: float = 0.0         # 不可逆阻力
+    Rg: float = 0.0            # 凝胶层阻力
     R_total: float = 0.0
     # 临界通量
     J_crit: float = 0.0         # 临界通量 LMH
@@ -270,6 +275,12 @@ class SimulationMetrics:
     # K_Lim
     K_val: float = 0.0          # K 值 (Jun & Daigger, 2024)
     K_lim: float = 0.0          # 极限 K 值
+    # Slug Bubble
+    slug_formed: bool = False   # Slug 气泡是否形成
+    slug_length_mm: float = 0.0 # Slug 长度 mm
+    slug_shear_boost: float = 1.0  # 剪切增强倍数
+    slug_energy_saving: float = 0.0  # 节能百分比
+    slug_recommendation: str = ""   # 设计建议
 
 
 # ==================== ASM1 生物动力学模型 ====================
@@ -519,12 +530,14 @@ class CriticalFluxModel:
     def __init__(self) -> None:
         self.J_crit: float = PHYS.J_crit_default  # LMH
         self.J_sustainable: float = PHYS.J_crit_default * PHYS.J_sustainable_ratio
-        self.K_lim: float = 0.05  # 极限 K 值 (经验)
+        self.K_lim: float = PHYS.K_lim_default  # 极限 K 值 (Jun & Daigger, 2024)
+        self.K_val: float = 0.0
         self.ml_viscosity: float = 1.0
+        self.operating_regime: str = "subcritical"  # subcritical | critical | supercritical
 
     def update(self, mlss: float, mlr: float, eps: float,
                temperature: float, wall_shear: float,
-               packing_density: float) -> Dict[str, float]:
+               packing_density: float, actual_flux: float = 15.0) -> Dict[str, float]:
         """
         更新临界通量和 K 值
 
@@ -535,9 +548,10 @@ class CriticalFluxModel:
             temperature: 水温 °C
             wall_shear: 近壁剪切 Pa
             packing_density: 膜装填密度 m²/m³
+            actual_flux: 实际运行通量 LMH
 
         返回:
-            dict: J_crit, J_sustainable, K_val
+            dict: J_crit, J_sustainable, K_val, K_lim, operating_regime
         """
         # 临界通量修正 (EPS 和温度影响)
         eps_factor = 1.0 + (eps - 50.0) / 100.0  # EPS 高 → J_crit 低
@@ -547,15 +561,39 @@ class CriticalFluxModel:
 
         self.J_sustainable = self.J_crit * PHYS.J_sustainable_ratio
 
+        # K_Lim 动态计算 (Jun & Daigger, 2024)
+        # K_Lim 受 EPS 和 MLSS 影响: 污泥越粘 → K_Lim 越低
+        eps_ratio = eps / 50.0
+        mlss_ratio = mlss / 8000.0
+        self.K_lim = PHYS.K_lim_default \
+            * (1.0 - PHYS.K_lim_eps_factor * max(0.0, eps_ratio - 1.0)) \
+            * (1.0 - PHYS.K_lim_mlss_factor * max(0.0, mlss_ratio - 1.0))
+        self.K_lim = float(np.clip(self.K_lim, 0.01, 0.15))
+
         # K 值 (Jun & Daigger, 2024)
         # K = (J × MLSS × μ_ML) / (τ_w × packing_density)
-        J_mh = self.J_crit / 1000.0  # m/h
+        J_mh = actual_flux / 1000.0  # m/h
         self.ml_viscosity = mlr * PHYS.mu_l * 1000.0  # 转换为 mPa·s
         K_val = (J_mh * mlss / 1000.0 * self.ml_viscosity) / \
                 (max(wall_shear, 0.01) * max(packing_density, 10.0))
         K_val = float(np.clip(K_val, 0.001, 1.0))
+        self.K_val = K_val
 
-        return {"J_crit": self.J_crit, "J_sustainable": self.J_sustainable, "K_val": K_val}
+        # 运行状态判断
+        if actual_flux < self.J_sustainable:
+            self.operating_regime = "subcritical"     # 亚临界: 无污染
+        elif actual_flux < self.J_crit:
+            self.operating_regime = "critical"        # 临界: 可逆污染
+        else:
+            self.operating_regime = "supercritical"   # 超临界: 不可逆污染
+
+        return {
+            "J_crit": self.J_crit,
+            "J_sustainable": self.J_sustainable,
+            "K_val": self.K_val,
+            "K_lim": self.K_lim,
+            "operating_regime": self.operating_regime,
+        }
 
 
 # ==================== DFCm 过滤性表征 ====================
@@ -844,12 +882,19 @@ class SlugBubbleModel:
 
     设计条件:
       pipe_gap > h_crit 时 slug 气泡可充分发展
+
+    行业对比 (SADm):
+      - 常规连续曝气: 0.5-1.5 Nm³/m²/h
+      - 脉冲曝气: 0.3-0.8 Nm³/m²/h
+      - Slug 气泡: 0.2-0.5 Nm³/m²/h (节能 ~50%)
     """
 
     def __init__(self) -> None:
         self.slug_formed: bool = False
         self.slug_length: float = 0.0      # 聚并气泡长度 m
         self.shear_boost: float = 1.0       # 剪切增强倍数
+        self.energy_saving_pct: float = 0.0 # 节能百分比
+        self.design_recommendation: str = "" # 设计建议
 
     def update(self, pipe_gap: float, intensity: float,
                h_size: float, sheet_spacing: float) -> Dict[str, float]:
@@ -876,17 +921,45 @@ class SlugBubbleModel:
             # slug 长度 ≈ 0.5 × 通道宽度 (经验)
             self.slug_length = min(0.5 * (sheet_spacing / 1000.0), 0.3)
             self.shear_boost = PHYS.slug_shear_boost  # 6×
-            energy_reduction = 0.50  # 50% 能耗降低
+            self.energy_saving_pct = 0.50  # 50% 能耗降低
+
+            # 设计建议
+            if pipe_gap >= h_crit * 1.5:
+                self.design_recommendation = "✔ Slug充分发展,距离充足"
+            else:
+                self.design_recommendation = "⚠ Slug可形成,建议增大距离"
         else:
             self.slug_length = 0.0
             self.shear_boost = 1.0
-            energy_reduction = 0.0
+            self.energy_saving_pct = 0.0
+
+            # 诊断为什么没形成
+            reasons = []
+            if not gap_condition:
+                reasons.append(f"距离不足({pipe_gap*1000:.0f}<{h_crit*1000:.0f}mm)")
+            if not spacing_condition:
+                reasons.append("帘间距过小")
+            if not flow_condition:
+                reasons.append("气量不足")
+            self.design_recommendation = "✘ Slug未形成: " + ", ".join(reasons) if reasons else "✘ Slug未形成"
 
         return {
             "slug_formed": self.slug_formed,
             "slug_length": self.slug_length,
             "shear_boost": self.shear_boost,
-            "energy_reduction": energy_reduction,
+            "energy_reduction": self.energy_saving_pct,
+            "design_recommendation": self.design_recommendation,
+        }
+
+    def get_industry_comparison(self, current_sadm: float) -> Dict[str, float]:
+        """
+        行业 SADm 对比 (Nm³/m²/h)
+        """
+        return {
+            "conventional": 1.0,      # 常规连续曝气基准
+            "pulse": 0.6,             # 脉冲曝气
+            "slug": 0.4,              # Slug 气泡曝气
+            "current": current_sadm,  # 当前值
         }
 
 
@@ -1084,7 +1157,7 @@ class MBRSimulator:
         # 8. Critical Flux / K_Lim
         pd = self.get_total_area() / (PHYS.sheet_width * PHYS.sheet_count * 0.01 * pipe_gap_m)
         self.critical_flux.update(self.mlss, mlr, eps, self.temperature,
-                                  wall_shear, pd)
+                                  wall_shear, pd, actual_flux=self.flux)
 
         # 9. DFCm
         self.dfcm.update(eps, smp, self.mlss, self.srt, wall_shear)
@@ -1121,13 +1194,17 @@ class MBRSimulator:
         cf = self.critical_flux
         asm_out = self.asm1.step(0.01, self.mlss)
 
-        # K_Lim 最小 SADp
-        sadp_crit = sadp * (cf.K_lim / max(cf.K_lim, 0.001)) if cf.K_lim > 0 else 0.0
+        # K_Lim 最小 SADp: 基于 K 值反推所需最小曝气
+        if cf.K_val > 0 and cf.K_lim > 0:
+            sadp_crit = sadp * (cf.K_val / cf.K_lim)
+            sadp_crit = round(float(np.clip(sadp_crit, 1.0, 100.0)), 1)
+        else:
+            sadp_crit = 0.0
 
         return SimulationMetrics(
             sec=self.calculate_sec(),
             power_w=round(self.power_w, 1),
-            sadm=sadm, sadp=sadp, sadp_crit=round(sadp_crit, 1),
+            sadm=sadm, sadp=sadp, sadp_crit=sadp_crit,
             d_32=round(d32, 2),
             gas_velocity=round(self.get_superficial_gas_velocity(), 4),
             gas_holdup=round(self.drift_flux.alpha_g * 100, 2),
@@ -1145,6 +1222,7 @@ class MBRSimulator:
             tmp=self.get_current_tmp(),
             Rm=round(fs["Rm"], 1), Rc=round(fs["Rc"], 1),
             Rp=round(fs["Rp"], 1), R_irr=round(fs["R_irr"], 1),
+            Rg=round(fs.get("Rg", 0.0), 1),
             R_total=round(fs["R_total"], 1),
             J_crit=round(cf.J_crit, 1),
             J_sustainable=round(cf.J_sustainable, 1),
@@ -1161,6 +1239,11 @@ class MBRSimulator:
             sludge_percent=(self.sludge_level / PHYS.sludge_layer_max_height) * 100.0,
             K_val=round(getattr(cf, 'K_val', 0.0), 4),
             K_lim=round(cf.K_lim, 4),
+            slug_formed=slug_info.get("slug_formed", False),
+            slug_length_mm=round(slug_info.get("slug_length", 0.0) * 1000, 1),
+            slug_shear_boost=round(slug_info.get("shear_boost", 1.0), 1),
+            slug_energy_saving=round(slug_info.get("energy_reduction", 0.0) * 100, 1),
+            slug_recommendation=slug_info.get("design_recommendation", ""),
         )
 
     def get_state_snapshot(self) -> Dict:
@@ -1260,6 +1343,20 @@ def generate_3d_html(sim: MBRSimulator) -> str:
     mh = fl + 0.3; by = -(pg + 0.3)
     d32 = sim.pbm.get_sauter_diameter() * 1e3
     slug_ok = sim.slug.slug_formed
+    h_crit = PHYS.slug_critical_height  # 250mm 临界高度
+
+    # 运行状态颜色
+    J_sus = sim.critical_flux.J_sustainable
+    regime = sim.critical_flux.operating_regime
+    if regime == "subcritical":
+        regime_color = "#44ff88"
+        regime_text = "亚临界运行"
+    elif regime == "critical":
+        regime_color = "#ffaa44"
+        regime_text = "临界运行"
+    else:
+        regime_color = "#ff4444"
+        regime_text = "超临界运行"
 
     return f"""<!DOCTYPE html>
 <html lang="zh">
@@ -1270,6 +1367,8 @@ def generate_3d_html(sim: MBRSimulator) -> str:
   #info {{ position: absolute; top: 10px; left: 20px; color: #c9d1d9; font-size: 11px; line-height: 1.5; z-index: 10; }}
   .legend {{ position: absolute; bottom: 20px; right: 20px; color: #8b949e; font-size: 10px; background: rgba(13,17,23,0.75); padding: 6px 10px; border-radius: 4px; z-index: 10; }}
   .legend span {{ display: inline-block; width: 10px; height: 10px; margin-right: 3px; border-radius: 2px; vertical-align: middle; }}
+  #regime {{ position: absolute; top: 10px; right: 20px; padding: 6px 12px; border-radius: 4px; font-size: 12px; font-weight: bold; z-index: 10;
+           background: {regime_color}22; color: {regime_color}; border: 1px solid {regime_color}; }}
 </style>
 </head>
 <body>
@@ -1279,12 +1378,15 @@ def generate_3d_html(sim: MBRSimulator) -> str:
   膜丝{sim.fiber_diameter}mm×{fl:.1f}m | {PHYS.sheet_count}帘 | SADm={sim.intensity:.0f} | d_32={d32:.2f}mm<br>
   TMP={sim.get_current_tmp():.1f}kPa | J_crit={sim.critical_flux.J_crit:.0f}LMH | DO={sim.mixed_liquor.do_level:.1f}mg/L<br>
   EPS={sim.eps_smp.eps:.0f}mg/gVSS | SMP={sim.eps_smp.smp:.1f}mg/L | ΔR20={sim.dfcm.delta_R20/1e12:.2f}e12<br>
-  &#9888; TMP>{PHYS.tmp_industry_recommended:.0f}kPa需反洗 (行业推荐) | {'Slug气泡已形成' if slug_ok else 'Slug未形成'}
+  曝气-膜距: {sim.pipe_to_membrane_gap}mm | 临界高度: {h_crit*1000:.0f}mm | {'Slug气泡已形成' if slug_ok else 'Slug未形成'}<br>
+  <span style="color:{regime_color}">▶ {regime_text} (J={sim.flux:.0f} / J_sus={J_sus:.0f} LMH)</span>
 </div>
+<div id="regime">{regime_text}</div>
 <div class="legend">
   <span style="background:#ddd"></span>膜壳 <span style="background:#4499ff"></span>膜丝
   <span style="background:#66aadd"></span>集水管 <span style="background:#ff8844"></span>曝气管
   <span style="background:#886633;opacity:0.4"></span>污泥
+  <span style="background:#ff4444"></span>临界高度
 </div>
 <script type="importmap">
 {{ "imports": {{ "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
@@ -1297,6 +1399,7 @@ import {{ OrbitControls }} from 'three/addons/controls/OrbitControls.js';
 const SW={sw:.3f},FL={fl:.3f},SS={ss:.3f},SC={PHYS.sheet_count},TD={td:.3f};
 const MH={mh:.3f},MD={md:.3f},HH={hh:.3f},HW={hw:.3f},SH={sh:.3f},PG={pg:.3f};
 const SLACK={sl:.3f},FD={fd:.5f},VFC=6,VFCZ=3,SEGS=4,by={by:.3f};
+const HCRIT={h_crit:.3f},SLUG_OK={1 if slug_ok else 0};
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x0d1117);
@@ -1328,8 +1431,30 @@ const fiberMat = new THREE.MeshStandardMaterial({{color:0x4499ff, metalness:0.02
 const headerMat = new THREE.MeshStandardMaterial({{color:0x66aadd, metalness:0.4, roughness:0.3}});
 const pipeMat = new THREE.MeshStandardMaterial({{color:0xff8844, metalness:0.4, roughness:0.4}});
 const sludgeMat = new THREE.MeshStandardMaterial({{color:0x775522, metalness:0, roughness:1.0, transparent:true, opacity:0.45}});
+const critMat = new THREE.LineBasicMaterial({{color:0xff4444, transparent:true, opacity:0.6, linewidth:2}});
 const segGeo = new THREE.CylinderGeometry(FD*0.5, FD*0.5, FL/SEGS, 4);
 const dummy = new THREE.Object3D();
+
+// 临界高度指示线 (h_crit = 250mm)
+const critY = -PG + HCRIT;
+const critGeo = new THREE.BufferGeometry().setFromPoints([
+  new THREE.Vector3(-0.1, critY, -0.1),
+  new THREE.Vector3(SW+0.1, critY, -0.1),
+  new THREE.Vector3(SW+0.1, critY, TD+0.1),
+  new THREE.Vector3(-0.1, critY, TD+0.1),
+  new THREE.Vector3(-0.1, critY, -0.1),
+]);
+scene.add(new THREE.Line(critGeo, critMat));
+
+// 曝气-膜片距离标注线
+const distGeo = new THREE.BufferGeometry().setFromPoints([
+  new THREE.Vector3(SW+0.05, -PG, TD*0.5),
+  new THREE.Vector3(SW+0.05, 0, TD*0.5),
+]);
+const distMat = new THREE.LineDashedMaterial({{color:0x44ff88, dashSize:0.02, gapSize:0.01}});
+const distLine = new THREE.Line(distGeo, distMat);
+distLine.computeLineDistances();
+scene.add(distLine);
 
 for (let si=0; si<SC; si++) {{
   const cz=si*(MD+SS), yTop=FL+0.15;
@@ -1390,12 +1515,14 @@ const wl=new THREE.Mesh(wGeo,wMat); wl.position.set(SW*0.5,sTopY,TD*0.5); scene.
 
 const bGeo=new THREE.SphereGeometry(0.008,5,5);
 const bMat=new THREE.MeshBasicMaterial({{color:0xaaddff,transparent:true,opacity:0.5}});
+const slugBMat=new THREE.MeshBasicMaterial({{color:0x88ffcc,transparent:true,opacity:0.7}});
 const bubbles=[];
 for (let i=0; i<50; i++) {{
-  const b=new THREE.Mesh(bGeo,bMat);
+  const isSlug = SLUG_OK && i < 10;
+  const b=new THREE.Mesh(isSlug ? new THREE.SphereGeometry(0.02,6,6) : bGeo, isSlug ? slugBMat : bMat);
   const si=Math.floor(Math.random()*SC);
   b.position.set(SW*0.1+Math.random()*SW*0.8,pipeY+Math.random()*(FL*0.8),si*(MD+SS)+Math.random()*MD);
-  b.userData={{speed:0.004+Math.random()*0.008,ox:b.position.x,oz:b.position.z,phase:Math.random()*Math.PI*2}};
+  b.userData={{speed:isSlug?0.012:0.004+Math.random()*0.008,ox:b.position.x,oz:b.position.z,phase:Math.random()*Math.PI*2,slug:isSlug}};
   scene.add(b); bubbles.push(b);
 }}
 
@@ -1500,28 +1627,29 @@ def render_sidebar(sim: MBRSimulator) -> None:
 
 def render_metrics(m: SimulationMetrics) -> None:
     tmp_warn = f">{PHYS.tmp_industry_recommended:.0f}kPa需反洗" if m.tmp > PHYS.tmp_industry_recommended else None
-    flux_warn = f">J_crit {m.J_sustainable:.0f}" if m.J_actual > m.J_sustainable else None
+    flux_warn = f">J_sus {m.J_sustainable:.0f}" if m.J_actual > m.J_sustainable else None
+    k_warn = f"K>K_lim" if m.K_val > m.K_lim else None
 
     rows = [
         [("SEC", f"{m.sec}kWh/m³", ">1.2行业基准" if m.sec>1.2 else None),
          ("SADm", f"{m.sadm}Nm³/m²/h", None), ("SADp", f"{m.sadp}Nm³/m³", None),
-         ("SADp_crit", f"{m.sadp_crit}Nm³/m³", None)],
+         ("SADp_min", f"{m.sadp_crit}Nm³/m³", "需增加曝气" if m.sadp < m.sadp_crit else None)],
         [("DO", f"{m.do_level}mg/L", None), ("MLR", f"{m.mlr:.1f}x", None),
          ("气含率", f"{m.gas_holdup}%", None), ("d_32", f"{m.d_32}mm", None)],
         [("TMP", f"{m.tmp}kPa", tmp_warn),
          ("J_crit", f"{m.J_crit}LMH", None), ("J_sus", f"{m.J_sustainable}LMH", None),
          ("J_actual", f"{m.J_actual}LMH", flux_warn)],
         [("τ_avg", f"{m.shear_avg}Pa", None), ("τ_max", f"{m.shear_max}Pa", None),
-         ("k", f"{m.k_turb:.4f}", None), ("ε", f"{m.epsilon_turb:.4f}", None)],
+         ("K_val", f"{m.K_val:.4f}", k_warn), ("K_lim", f"{m.K_lim:.4f}", None)],
         [("COD", f"{m.cod_eff}mg/L", None), ("NH4", f"{m.nh4_eff}mg/L", None),
          ("NO3", f"{m.no3_eff}mg/L", None), ("TN", f"{m.tn_eff}mg/L", None)],
         [("EPS", f"{m.eps}mg/gVSS", None), ("SMP", f"{m.smp}mg/L", None),
          ("ΔR20", f"{m.dfcm_index}e12", ">2需调整" if m.dfcm_index>2.0 else None),
          ("积垢风险", m.risk_text, "inverse" if m.risk_text=="HIGH" else "normal")],
         [("R_m", f"{m.Rm:.1e}", None), ("R_cake", f"{m.Rc:.1e}", None),
-         ("R_pore", f"{m.Rp:.1e}", None), ("R_irr", f"{m.R_irr:.1e}", None)],
-        [("SVI", f"{m.svi}mL/g", None), ("TSS", f"{m.tss}mg/L", None),
-         ("MLVSS", f"{m.mlvss}mg/L", None), ("膜面积", f"{m.total_area}㎡", None)],
+         ("R_pore", f"{m.Rp:.1e}", None), ("R_gel", f"{m.Rg:.1e}", None)],
+        [("R_irr", f"{m.R_irr:.1e}", None), ("R_total", f"{m.R_total:.1e}", None),
+         ("SVI", f"{m.svi}mL/g", None), ("膜面积", f"{m.total_area}㎡", None)],
     ]
     for row in rows:
         cols = st.columns(len(row))
@@ -1534,6 +1662,47 @@ def render_metrics(m: SimulationMetrics) -> None:
                     else:
                         kw["delta_color"] = delta
                 st.metric(**kw)
+
+
+def render_slug_info(m: SimulationMetrics) -> None:
+    """Slug Bubble 曝气设计建议 (行业标准)"""
+    with st.expander("🫧 Slug Bubble 曝气设计评估 (Wang et al, 2018)", expanded=False):
+        st.info(m.slug_recommendation)
+        c1, c2, c3, c4 = st.columns(4)
+        with c1:
+            st.metric("Slug形成", "✔ 是" if m.slug_formed else "✘ 否")
+        with c2:
+            st.metric("Slug长度", f"{m.slug_length_mm}mm")
+        with c3:
+            st.metric("剪切增强", f"{m.slug_shear_boost}x")
+        with c4:
+            st.metric("节能潜力", f"{m.slug_energy_saving}%")
+
+        st.markdown("#### 行业 SADm 对比 (Nm³/m²/h)")
+        comparison_data = {
+            "曝气方式": ["常规连续", "脉冲曝气", "Slug气泡", "当前值"],
+            "SADm": [1.0, 0.6, 0.4, m.sadm / 1000.0 if m.sadm > 100 else m.sadm],
+        }
+        fig = go.Figure(data=[
+            go.Bar(name="SADm", x=comparison_data["曝气方式"],
+                   y=comparison_data["SADm"],
+                   marker_color=["#888888", "#66aadd", "#44ff88", "#ff8844"])
+        ])
+        fig.update_layout(height=250, template="plotly_dark",
+                          yaxis_title="SADm (Nm³/m²/h)",
+                          margin=dict(l=10, r=10, t=10, b=10))
+        st.plotly_chart(fig, use_container_width=True)
+
+        st.markdown("#### 设计要点")
+        st.markdown(
+            """
+        - **临界高度**: 曝气-膜片距离 ≥ 250mm (slug 聚并必需)
+        - **帘间距**: 建议 ≥ 50mm (保证 slug 通道)
+        - **节能效果**: Slug 曝气比常规曝气节能约 50%
+        - **剪切增强**: Slug 气泡剪切力可达常规气泡 6 倍
+        - **适用场景**: 高 MLSS (>10g/L)、高通量 (>20LMH) 工况
+        """
+        )
 
 
 def render_trend(sim: MBRSimulator) -> None:
@@ -1650,6 +1819,7 @@ def main() -> None:
     st.markdown("### 🖥️ 3D 可视化视图")
     st.components.v1.html(generate_3d_html(sim), height=600, scrolling=False)
 
+    render_slug_info(m)
     render_trend(sim)
     render_openfoam_export(sim)
     render_export_panel(sim)
